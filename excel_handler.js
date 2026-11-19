@@ -1,0 +1,968 @@
+/**
+ * HJC 스마트스토어 엑셀 입출력 및 OOXML 무손상 패치 모듈
+ * - 읽기: JSZip 기반 OOXML 직접 파싱 (일괄수정 시트 정확 추출)
+ * - 업로드용 쓰기: 원본 .xlsx ZIP의 스타일/서식/유효성검사/열너비를 100% 보존하며 M/S/Y 셀만 정밀 패치
+ * - 검토표 쓰기: ExcelJS 기반 5개 시트(신규·미매칭, 적용 기준, 상품별 요약, 옵션별 상세, 추가상품 상세)
+ * - 보조 입력: 네이버 실패 엑셀(error_excel_*.xlsx) 파싱, 오늘출발 수량 CSV/XLSX 파싱
+ */
+(function (root, factory) {
+  if (typeof module === 'object' && module.exports) {
+    module.exports = factory();
+  } else {
+    root.HJCExcel = factory();
+  }
+})(typeof self !== 'undefined' ? self : this, function () {
+  'use strict';
+
+  function getJSZip(injected) {
+    if (injected) return injected;
+    if (typeof window !== 'undefined' && window.JSZip) return window.JSZip;
+    if (typeof globalThis !== 'undefined' && globalThis.JSZip) return globalThis.JSZip;
+    throw new Error('JSZip 라이브러리가 로드되지 않았습니다.');
+  }
+
+  function getExcelJS(injected) {
+    if (injected) return injected;
+    if (typeof window !== 'undefined' && window.ExcelJS) return window.ExcelJS;
+    if (typeof globalThis !== 'undefined' && globalThis.ExcelJS) return globalThis.ExcelJS;
+    throw new Error('ExcelJS 라이브러리가 로드되지 않았습니다.');
+  }
+
+  // 열 문자 <-> 1-based 인덱스 변환
+  function colLettersToNum(letters) {
+    let n = 0;
+    const s = String(letters || '').toUpperCase();
+    for (let i = 0; i < s.length; i++) {
+      n = n * 26 + (s.charCodeAt(i) - 64);
+    }
+    return n;
+  }
+
+  function numToColLetters(num) {
+    let n = num;
+    let out = '';
+    while (n > 0) {
+      const rem = (n - 1) % 26;
+      out = String.fromCharCode(65 + rem) + out;
+      n = Math.floor((n - 1) / 26);
+    }
+    return out;
+  }
+
+  function escapeXml(str) {
+    return String(str ?? '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&apos;');
+  }
+
+  function unescapeXml(str) {
+    return String(str ?? '')
+      .replace(/&#x([0-9a-fA-F]+);/g, (_, h) => String.fromCharCode(parseInt(h, 16)))
+      .replace(/&#(\d+);/g, (_, d) => String.fromCharCode(parseInt(d, 10)))
+      .replace(/&apos;/g, "'")
+      .replace(/&quot;/g, '"')
+      .replace(/&gt;/g, '>')
+      .replace(/&lt;/g, '<')
+      .replace(/&amp;/g, '&')
+      .replace(/_x000D_/g, '\r');
+  }
+
+  function normalizeNewlines(str) {
+    return String(str ?? '').replace(/\r\n/g, '\n').replace(/\r/g, '\n');
+  }
+
+  function getAttr(tagStr, attrName) {
+    const re = new RegExp(`(?:^|\\s)${attrName}="([^"]*)"`);
+    const m = tagStr.match(re);
+    return m ? unescapeXml(m[1]) : null;
+  }
+
+  // xl/workbook.xml + rels에서 대상 시트 경로 찾기
+  async function resolveSheetPath(zip, preferredSheetName = '일괄수정') {
+    const wbFile = zip.file('xl/workbook.xml');
+    const relsFile = zip.file('xl/_rels/workbook.xml.rels');
+    if (!wbFile || !relsFile) {
+      throw new Error('유효한 Excel(.xlsx) 파일 구조가 아닙니다.');
+    }
+
+    const wbXml = await wbFile.async('string');
+    const relsXml = await relsFile.async('string');
+
+    const sheets = [];
+    const sheetRe = /<sheet\b[^>]*>/g;
+    let m;
+    while ((m = sheetRe.exec(wbXml)) !== null) {
+      const tag = m[0];
+      const name = getAttr(tag, 'name');
+      const rId = getAttr(tag, 'r:id') || getAttr(tag, 'id');
+      if (name && rId) sheets.push({ name, rId });
+    }
+
+    if (sheets.length === 0) {
+      throw new Error('워크북에서 시트를 찾을 수 없습니다.');
+    }
+
+    const targetSheet = sheets.find(s => s.name === preferredSheetName) || sheets[0];
+    const usedFallback = targetSheet.name !== preferredSheetName;
+
+    const relRe = /<Relationship\b[^>]*>/g;
+    let targetPath = null;
+    while ((m = relRe.exec(relsXml)) !== null) {
+      const tag = m[0];
+      const id = getAttr(tag, 'Id');
+      if (id === targetSheet.rId) {
+        let tgt = getAttr(tag, 'Target') || '';
+        tgt = tgt.replace(/^\/+/, '');
+        if (!tgt.startsWith('xl/')) tgt = 'xl/' + tgt.replace(/^\.\.\//, '');
+        targetPath = tgt;
+        break;
+      }
+    }
+
+    if (!targetPath || !zip.file(targetPath)) {
+      throw new Error(`시트 XML 경로를 찾을 수 없습니다: ${targetSheet.name}`);
+    }
+
+    return {
+      sheetName: targetSheet.name,
+      sheetPath: targetPath,
+      usedFallback,
+      allSheetNames: sheets.map(s => s.name)
+    };
+  }
+
+  // xl/sharedStrings.xml 파싱
+  function parseSharedStrings(xml) {
+    const list = [];
+    if (!xml) return list;
+    const siRe = /<si\b[^>]*>([\s\S]*?)<\/si>/g;
+    let m;
+    while ((m = siRe.exec(xml)) !== null) {
+      const inner = m[1];
+      let text = '';
+      const tRe = /<t\b[^>]*>([\s\S]*?)<\/t>/g;
+      let tm;
+      while ((tm = tRe.exec(inner)) !== null) {
+        text += unescapeXml(tm[1]);
+      }
+      list.push(text);
+    }
+    return list;
+  }
+
+  // 시트 XML에서 특정 행 범위의 셀 읽기
+  function parseSheetRows(sheetXml, sharedStrings) {
+    const rowsMap = new Map();
+    const rowRe = /<row\b([^>]*?)(?:\/>|>([\s\S]*?)<\/row>)/g;
+    let rm;
+    while ((rm = rowRe.exec(sheetXml)) !== null) {
+      const rowAttrs = rm[1];
+      const rowBody = rm[2] || '';
+      const rAttr = getAttr('<row ' + rowAttrs + '>', 'r');
+      const rowNum = parseInt(rAttr || '0', 10);
+      if (!rowNum) continue;
+
+      const cells = new Map();
+      const cellRe = /<c\b([^>]*?)(?:\/>|>([\s\S]*?)<\/c>)/g;
+      let cm;
+      while ((cm = cellRe.exec(rowBody)) !== null) {
+        const cAttrs = cm[1];
+        const cBody = cm[2] || '';
+        const ref = getAttr('<c ' + cAttrs + '>', 'r');
+        const type = getAttr('<c ' + cAttrs + '>', 't') || '';
+        if (!ref) continue;
+        const colMatch = ref.match(/^([A-Z]+)(\d+)$/i);
+        if (!colMatch) continue;
+        const colNum = colLettersToNum(colMatch[1]);
+
+        let val = '';
+        if (type === 's') {
+          const vm = cBody.match(/<v\b[^>]*>([\s\S]*?)<\/v>/);
+          if (vm) {
+            const idx = parseInt(vm[1].trim(), 10);
+            val = sharedStrings[idx] ?? '';
+          }
+        } else if (type === 'inlineStr') {
+          let tAcc = '';
+          const tRe = /<t\b[^>]*>([\s\S]*?)<\/t>/g;
+          let tm;
+          while ((tm = tRe.exec(cBody)) !== null) {
+            tAcc += unescapeXml(tm[1]);
+          }
+          val = tAcc;
+        } else {
+          const vm = cBody.match(/<v\b[^>]*>([\s\S]*?)<\/v>/);
+          if (vm) val = unescapeXml(vm[1]);
+        }
+
+        cells.set(colNum, normalizeNewlines(val));
+      }
+
+      rowsMap.set(rowNum, cells);
+    }
+    return rowsMap;
+  }
+
+  /**
+   * 1. 스마트스토어 일괄수정 엑셀 파싱
+   */
+  async function parseSmartStoreExcel(arrayBuffer, deps = {}) {
+    const JSZipLib = getJSZip(deps.JSZip);
+    const zip = await JSZipLib.loadAsync(arrayBuffer);
+    const sheetInfo = await resolveSheetPath(zip, '일괄수정');
+    const ssFile = zip.file('xl/sharedStrings.xml');
+    const sharedStrings = ssFile ? parseSharedStrings(await ssFile.async('string')) : [];
+    const sheetXml = await zip.file(sheetInfo.sheetPath).async('string');
+
+    const rowsMap = parseSheetRows(sheetXml, sharedStrings);
+    const headerRow2 = rowsMap.get(2) || new Map();
+
+    // 판매자바코드 컬럼 자동 탐색 (§12.8)
+    let sellerBarcodeCol = null;
+    for (const [colNum, headerText] of headerRow2.entries()) {
+      const clean = String(headerText || '').replace(/\s+/g, '');
+      if (clean === '판매자바코드') {
+        sellerBarcodeCol = colNum;
+        break;
+      }
+    }
+
+    const rowNumbers = Array.from(rowsMap.keys()).filter(r => r >= 3).sort((a, b) => a - b);
+    const productRows = [];
+
+    for (const r of rowNumbers) {
+      const cells = rowsMap.get(r);
+      const productNo = (cells.get(1) || '').trim();
+      const productName = (cells.get(4) || '').trim();
+      if (!productNo && !productName) continue;
+
+      productRows.push({
+        rowIndex: r,
+        productNo,
+        sellerCode: (cells.get(2) || '').trim(),
+        sellerBarcode: sellerBarcodeCol ? (cells.get(sellerBarcodeCol) || '').trim() : '',
+        productName,
+        totalStock: cells.get(13) ?? '',
+        optionType: (cells.get(14) || '').trim(),
+        optionName: (cells.get(15) || '').trim(),
+        optionValues: cells.get(17) ?? '',
+        optionStocks: cells.get(19) ?? '',
+        addonNames: cells.get(22) ?? '',
+        addonValues: cells.get(23) ?? '',
+        addonPrices: cells.get(24) ?? '',
+        addonStocks: cells.get(25) ?? ''
+      });
+    }
+
+    return {
+      sheetName: sheetInfo.sheetName,
+      sheetPath: sheetInfo.sheetPath,
+      usedFallbackSheet: sheetInfo.usedFallback,
+      headerWarnings: validateHeaders(headerRow2),
+      productRows
+    };
+  }
+
+  function validateHeaders(headerRow2) {
+    const warnings = [];
+    const expected = [
+      [1, '상품번호'],
+      [4, '상품명'],
+      [13, '재고수량'],
+      [17, '옵션값'],
+      [19, '옵션 재고수량']
+    ];
+    for (const [col, label] of expected) {
+      const actual = String(headerRow2.get(col) || '').trim();
+      if (actual && !actual.replace(/\s+/g, '').includes(label.replace(/\s+/g, ''))) {
+        warnings.push(`${numToColLetters(col)}2 헤더 불일치 (기대: ${label}, 실제: ${actual})`);
+      }
+    }
+    return warnings;
+  }
+
+  /**
+   * 2. 무결성 검증 (§8.1)
+   */
+  function verifyUpdatesIntegrity(productRows, cellUpdates) {
+    const rowByIdx = new Map(productRows.map(r => [r.rowIndex, r]));
+    const errors = [];
+
+    for (const upd of cellUpdates) {
+      const orig = rowByIdx.get(upd.rowIndex);
+      if (!orig) continue;
+
+      // (1) 옵션 재고 합계 == M열
+      if (upd.hasOptions) {
+        const origOptCount = String(orig.optionValues || '').split('\n').length;
+        const newOptParts = String(upd.newS || '').split('\n');
+        if (origOptCount !== newOptParts.length) {
+          errors.push(`행 ${upd.rowIndex}(${upd.productNo}): 옵션 개수 불일치 (${origOptCount} vs ${newOptParts.length})`);
+        }
+        const sumS = newOptParts.reduce((a, b) => a + (parseInt(b, 10) || 0), 0);
+        const valM = parseInt(upd.newM, 10) || 0;
+        if (sumS !== valM) {
+          errors.push(`행 ${upd.rowIndex}(${upd.productNo}): M열(${valM}) != S열 합계(${sumS})`);
+        }
+      }
+
+      // (2) 추가상품 V/W/Y 줄수·쉼표수 원본 일치
+      if (upd.hasAddons && orig.addonStocks) {
+        const origGroups = String(orig.addonStocks).split('\n');
+        const newGroups = String(upd.newY || '').split('\n');
+        if (origGroups.length !== newGroups.length) {
+          errors.push(`행 ${upd.rowIndex}(${upd.productNo}): 추가상품 그룹 수 불일치`);
+        } else {
+          for (let i = 0; i < origGroups.length; i++) {
+            if (origGroups[i].split(',').length !== newGroups[i].split(',').length) {
+              errors.push(`행 ${upd.rowIndex}(${upd.productNo}): 추가상품 ${i + 1}번 그룹 항목 수 불일치`);
+            }
+          }
+        }
+      }
+    }
+
+    return errors;
+  }
+
+  // <row> XML 문자열 안에서 특정 열(colNum)의 셀을 원본 스타일 유지하며 치환/삽입
+  function patchCellInRowXml(rowXml, rowNum, colNum, newStrValue, ssHelper) {
+    const colLetters = numToColLetters(colNum);
+    const cellRef = `${colLetters}${rowNum}`;
+    const cellRegex = new RegExp(`<c\\b([^>]*?\\br="${cellRef}"[^>]*?)(?:\\/>|>[\\s\\S]*?<\\/c>)`);
+
+    let replacementCell;
+    const match = rowXml.match(cellRegex);
+
+    // 기존 셀의 스타일(s="...") 속성 보존
+    let styleAttr = '';
+    if (match) {
+      const sVal = getAttr('<c ' + match[1] + '>', 's');
+      if (sVal !== null) styleAttr = ` s="${escapeXml(sVal)}"`;
+    }
+
+    if (ssHelper) {
+      const ssIdx = ssHelper.getOrAdd(newStrValue);
+      replacementCell = `<c r="${cellRef}"${styleAttr} t="s"><v>${ssIdx}</v></c>`;
+    } else {
+      replacementCell = `<c r="${cellRef}"${styleAttr} t="inlineStr"><is><t xml:space="preserve">${escapeXml(newStrValue)}</t></is></c>`;
+    }
+
+    if (match) {
+      return rowXml.replace(cellRegex, replacementCell);
+    }
+
+    // 기존 셀이 없는 경우: self-closing <row .../>를 펼치고 열 번호 순서 위치에 삽입
+    if (/\/>$/.test(rowXml)) {
+      return rowXml.replace(/\/>$/, `>${replacementCell}</row>`);
+    }
+
+    const openEnd = rowXml.indexOf('>') + 1;
+    const closeStart = rowXml.lastIndexOf('</row>');
+    const prefix = rowXml.slice(0, openEnd);
+    const body = rowXml.slice(openEnd, closeStart);
+    const suffix = rowXml.slice(closeStart);
+
+    // body 안에서 colNum보다 큰 첫 번째 <c> 앞에 삽입
+    const cRe = /<c\b([^>]*?)(?:\/>|>[\s\S]*?<\/c>)/g;
+    let cm;
+    let insertPos = body.length;
+    while ((cm = cRe.exec(body)) !== null) {
+      const ref = getAttr('<c ' + cm[1] + '>', 'r');
+      const m = ref && ref.match(/^([A-Z]+)\d+$/i);
+      if (m && colLettersToNum(m[1]) > colNum) {
+        insertPos = cm.index;
+        break;
+      }
+    }
+
+    return prefix + body.slice(0, insertPos) + replacementCell + body.slice(insertPos) + suffix;
+  }
+
+  // 행 번호 재번호 매김 (실패 엑셀 필터링 재추출 시 사용)
+  function renumberRowXml(rowXml, newRowNum) {
+    let out = rowXml.replace(/(<row\b[^>]*?\br=")\d+(")/, `$1${newRowNum}$2`);
+    out = out.replace(/(<c\b[^>]*?\br="[A-Z]+)\d+(")/gi, `$1${newRowNum}$2`);
+    return out;
+  }
+
+  /**
+   * 3. 업로드용 엑셀 생성 (OOXML 원본 무손상 XML 패치)
+   * - filterProductNos: Set<string> 전달 시 해당 상품번호 행만 남겨 재업로드용 엑셀 생성 (§9)
+   * - filterRowIndices: Set<number> 전달 시 해당 원본 행 번호만 남겨 분할 엑셀 생성
+   */
+  async function patchSmartStoreExcel(originalBuffer, productRows, cellUpdates, options = {}, deps = {}) {
+    if (!options.skipIntegrityCheck) {
+      const integrityErrors = verifyUpdatesIntegrity(productRows, cellUpdates);
+      if (integrityErrors.length > 0) {
+        throw new Error('무결성 검증 실패:\n' + integrityErrors.slice(0, 10).join('\n'));
+      }
+    }
+
+    const JSZipLib = getJSZip(deps.JSZip);
+    const zip = await JSZipLib.loadAsync(originalBuffer);
+    const sheetInfo = await resolveSheetPath(zip, '일괄수정');
+    let sheetXml = await zip.file(sheetInfo.sheetPath).async('string');
+
+    // sharedStrings.xml 준비 (있으면 기존 방식 그대로 추가/재사용 → Excel/openpyxl/스마트스토어 100% 호환)
+    const ssFile = zip.file('xl/sharedStrings.xml');
+    let ssXml = ssFile ? await ssFile.async('string') : null;
+    let ssHelper = null;
+
+    if (ssXml) {
+      const existingStrings = parseSharedStrings(ssXml);
+      const stringToIdx = new Map();
+      for (let i = 0; i < existingStrings.length; i++) {
+        if (!stringToIdx.has(existingStrings[i])) {
+          stringToIdx.set(existingStrings[i], i);
+        }
+      }
+      const appendedXml = [];
+      let totalCount = existingStrings.length;
+      const origCountMatch = ssXml.match(/<sst\b[^>]*?\bcount="(\d+)"/);
+      let origCount = origCountMatch ? parseInt(origCountMatch[1], 10) : existingStrings.length;
+
+      ssHelper = {
+        getOrAdd(val) {
+          const s = String(val ?? '');
+          origCount++;
+          if (stringToIdx.has(s)) return stringToIdx.get(s);
+          const idx = totalCount++;
+          stringToIdx.set(s, idx);
+          appendedXml.push(`<si><t xml:space="preserve">${escapeXml(s)}</t></si>`);
+          return idx;
+        },
+        finalizeXml() {
+          if (appendedXml.length === 0) return ssXml;
+          let updated = ssXml.replace(/<\/sst>\s*$/, appendedXml.join('') + '</sst>');
+          if (/\buniqueCount="\d+"/.test(updated)) {
+            updated = updated.replace(/(<sst\b[^>]*?\buniqueCount=")\d+(")/, `$1${totalCount}$2`);
+          }
+          if (/\bcount="\d+"/.test(updated)) {
+            updated = updated.replace(/(<sst\b[^>]*?\bcount=")\d+(")/, `$1${origCount}$2`);
+          }
+          return updated;
+        }
+      };
+    }
+
+    const updateByRow = new Map(cellUpdates.map(u => [u.rowIndex, u]));
+    const filterSet = options.filterProductNos instanceof Set && options.filterProductNos.size > 0
+      ? options.filterProductNos
+      : null;
+    const filterRowSet = options.filterRowIndices instanceof Set && options.filterRowIndices.size > 0
+      ? options.filterRowIndices
+      : null;
+    const isFiltering = Boolean(filterSet || filterRowSet);
+
+    // sheetData 내부 <row>만 순회하며 정밀 패치
+    let keptDataRowCount = 0;
+    let nextRowNum = 3;
+
+    sheetXml = sheetXml.replace(/<row\b([^>]*?)(?:\/>|>([\s\S]*?)<\/row>)/g, (fullMatch, rowAttrs) => {
+      const rAttr = getAttr('<row ' + rowAttrs + '>', 'r');
+      const rowNum = parseInt(rAttr || '0', 10);
+      if (!rowNum || rowNum < 3) return fullMatch;
+
+      const upd = updateByRow.get(rowNum);
+      if (filterRowSet) {
+        if (!filterRowSet.has(rowNum)) return '';
+      } else if (filterSet) {
+        if (!upd || !filterSet.has(String(upd.productNo).trim())) {
+          return ''; // 필터 대상이 아닌 행 제거
+        }
+      }
+
+      let patched = fullMatch;
+      if (upd) {
+        patched = patchCellInRowXml(patched, rowNum, 13, upd.newM, ssHelper);
+        if (upd.hasOptions) {
+          patched = patchCellInRowXml(patched, rowNum, 19, upd.newS, ssHelper);
+        }
+        if (upd.hasAddons) {
+          patched = patchCellInRowXml(patched, rowNum, 25, upd.newY, ssHelper);
+        }
+      }
+
+      if (isFiltering) {
+        patched = renumberRowXml(patched, nextRowNum);
+        nextRowNum++;
+        keptDataRowCount++;
+      }
+
+      return patched;
+    });
+
+    // 필터링으로 행 수가 줄었으면 <dimension ref="A1:CP..."/> 갱신
+    if (isFiltering) {
+      const lastRow = Math.max(2, 2 + keptDataRowCount);
+      sheetXml = sheetXml.replace(
+        /(<dimension\b[^>]*?\bref="[A-Z]+\d+:[A-Z]+)\d+(")/i,
+        `$1${lastRow}$2`
+      );
+    }
+
+    zip.file(sheetInfo.sheetPath, sheetXml);
+    if (ssHelper && ssFile) {
+      zip.file('xl/sharedStrings.xml', ssHelper.finalizeXml());
+    }
+
+    const outType = options.outputType || 'uint8array';
+    const output = await zip.generateAsync({
+      type: outType,
+      compression: 'DEFLATE',
+      compressionOptions: { level: 6 }
+    });
+
+    return {
+      data: output,
+      filteredCount: isFiltering ? keptDataRowCount : cellUpdates.length
+    };
+  }
+
+  /**
+   * 3-2. 업로드용 패키지 생성 (chunkSize 초과 시 500개 단위 분할 .xlsx → .zip 압축)
+   */
+  async function buildUploadPackage(originalBuffer, productRows, cellUpdates, options = {}, deps = {}) {
+    const integrityErrors = verifyUpdatesIntegrity(productRows, cellUpdates);
+    if (integrityErrors.length > 0) {
+      throw new Error('무결성 검증 실패:\n' + integrityErrors.slice(0, 10).join('\n'));
+    }
+
+    const chunkSize = Math.max(1, parseInt(options.chunkSize || 500, 10));
+    const baseFileName = options.baseFileName || '스마트스토어상품_재고수정용';
+    const filterSet = options.filterProductNos instanceof Set && options.filterProductNos.size > 0
+      ? options.filterProductNos
+      : null;
+
+    const targetUpdates = filterSet
+      ? cellUpdates.filter(u => filterSet.has(String(u.productNo).trim()))
+      : cellUpdates;
+
+    if (targetUpdates.length <= chunkSize) {
+      const patched = await patchSmartStoreExcel(
+        originalBuffer,
+        productRows,
+        cellUpdates,
+        { filterProductNos: filterSet, skipIntegrityCheck: true, outputType: 'uint8array' },
+        deps
+      );
+      const fileName = `${baseFileName}.xlsx`;
+      return {
+        isZip: false,
+        data: patched.data,
+        fileName,
+        mimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        totalCount: patched.filteredCount,
+        partCount: 1,
+        parts: [{ name: fileName, count: patched.filteredCount }]
+      };
+    }
+
+    const JSZipLib = getJSZip(deps.JSZip);
+    const outerZip = new JSZipLib();
+    const partCount = Math.ceil(targetUpdates.length / chunkSize);
+    const parts = [];
+
+    for (let p = 0; p < partCount; p++) {
+      const start = p * chunkSize;
+      const slice = targetUpdates.slice(start, start + chunkSize);
+      const startNum = start + 1;
+      const endNum = start + slice.length;
+      const partName = `${baseFileName}_${p + 1}of${partCount}_${startNum}-${endNum}.xlsx`;
+
+      const patched = await patchSmartStoreExcel(
+        originalBuffer,
+        productRows,
+        cellUpdates,
+        {
+          filterRowIndices: new Set(slice.map(u => u.rowIndex)),
+          skipIntegrityCheck: true,
+          outputType: 'uint8array'
+        },
+        deps
+      );
+      outerZip.file(partName, patched.data);
+      parts.push({ name: partName, count: patched.filteredCount });
+    }
+
+    const zipData = await outerZip.generateAsync({
+      type: 'uint8array',
+      compression: 'DEFLATE',
+      compressionOptions: { level: 6 }
+    });
+
+    return {
+      isZip: true,
+      data: zipData,
+      fileName: `${baseFileName}.zip`,
+      mimeType: 'application/zip',
+      totalCount: targetUpdates.length,
+      partCount,
+      parts
+    };
+  }
+
+  /**
+   * 4. 검토표 엑셀 생성 (§8.2, §12.7 — 5개 시트 + 수식 + 상태별 배경색)
+   */
+  async function generateReviewWorkbook(result, deps = {}) {
+    const ExcelJSLib = getExcelJS(deps.ExcelJS);
+    const wb = new ExcelJSLib.Workbook();
+    wb.creator = 'HJC SmartStore Inventory Matcher';
+    wb.created = new Date();
+
+    const FILL = {
+      header: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF1F2937' } },
+      subHeader: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF374151' } },
+      정상: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFE2EFDA' } },      // 연녹색
+      주의: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFF2CC' } },      // 연노랑
+      확인필요: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFFF2CC' } },  // 연노랑
+      미반영: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFFCE4D6' } },    // 연주황
+      제외: { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFEDEDED' } }       // 연회색
+    };
+
+    const FONT_HEADER = { name: '맑은 고딕', size: 10, bold: true, color: { argb: 'FFFFFFFF' } };
+    const FONT_BODY = { name: '맑은 고딕', size: 10 };
+    const BORDER_THIN = {
+      top: { style: 'thin', color: { argb: 'FFD1D5DB' } },
+      left: { style: 'thin', color: { argb: 'FFD1D5DB' } },
+      bottom: { style: 'thin', color: { argb: 'FFD1D5DB' } },
+      right: { style: 'thin', color: { argb: 'FFD1D5DB' } }
+    };
+
+    function styleHeaderRow(ws, rowIdx = 1) {
+      const row = ws.getRow(rowIdx);
+      row.height = 24;
+      row.eachCell(cell => {
+        cell.fill = FILL.header;
+        cell.font = FONT_HEADER;
+        cell.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
+        cell.border = BORDER_THIN;
+      });
+    }
+
+    function applyRowStyle(row, fillObj) {
+      row.eachCell({ includeEmpty: true }, cell => {
+        cell.font = FONT_BODY;
+        cell.border = BORDER_THIN;
+        cell.alignment = Object.assign({ vertical: 'middle' }, cell.alignment || {});
+        if (fillObj) cell.fill = fillObj;
+      });
+    }
+
+    // [시트 1] 신규·미매칭 (§12.7)
+    const wsQueue = wb.addWorksheet('신규·미매칭');
+    wsQueue.columns = [
+      { header: '구분', key: 'queueType', width: 18 },
+      { header: '상품번호', key: 'productNo', width: 16 },
+      { header: '상품명', key: 'productName', width: 42 },
+      { header: '옵션/추가상품', key: 'optionValue', width: 24 },
+      { header: '사유', key: 'reason', width: 32 },
+      { header: '기본 처리', key: 'currentAction', width: 16 },
+      { header: '추천 후보 1', key: 'cand1', width: 38 },
+      { header: '추천 후보 2', key: 'cand2', width: 38 },
+      { header: '추천 후보 3', key: 'cand3', width: 38 }
+    ];
+    styleHeaderRow(wsQueue, 1);
+    wsQueue.views = [{ state: 'frozen', ySplit: 1 }];
+    wsQueue.autoFilter = 'A1:I1';
+
+    const formatCand = c => c ? `${c.name} (점수:${c.score}, 매장:${c.totalStore}, 본사:${c.hqAny ? 'O' : 'X'})` : '-';
+    for (const q of result.reviewQueue) {
+      const row = wsQueue.addRow({
+        queueType: q.queueType,
+        productNo: q.productNo,
+        productName: q.productName,
+        optionValue: q.optionValue,
+        reason: q.reason,
+        currentAction: q.currentAction,
+        cand1: formatCand(q.candidates && q.candidates[0]),
+        cand2: formatCand(q.candidates && q.candidates[1]),
+        cand3: formatCand(q.candidates && q.candidates[2])
+      });
+      const fill = q.queueType.includes('실패') || q.queueType.includes('신제품') || q.queueType.includes('미매칭')
+        ? FILL.미반영 : FILL.확인필요;
+      applyRowStyle(row, fill);
+    }
+
+    // [시트 2] 적용 기준 (§8.2)
+    const wsCriteria = wb.addWorksheet('적용 기준');
+    wsCriteria.columns = [
+      { header: '항목', key: 'k', width: 26 },
+      { header: '기준 및 내용', key: 'v', width: 72 }
+    ];
+    styleHeaderRow(wsCriteria, 1);
+    const meta = result.meta;
+    const criteriaRows = [
+      ['매장 보유재고 기준일시', meta.storeTime],
+      ['HJC 본사 재고 기준일시', meta.hqTime],
+      ['검토표 생성 시각', new Date().toLocaleString('ko-KR')],
+      ['본사 가용 기본 재고(HQ_DEFAULT)', `${meta.hqDefault}개 (본사 O → max(${meta.hqDefault}, 매장수량) / 본사 X → 매장수량 그대로)`],
+      ['매칭 실패 처리', '기존 스마트스토어 재고 유지 (임의 품절 방지)'],
+      ['사이즈 없음 처리', '매칭된 헬멧 상품에 해당 사이즈가 재고목록에 없으면 0 처리 + "주의" 표시'],
+      ['추정 매칭 처리', '색상 유사 대체(화이트→펄화이트 등) 또는 유사코드(HJ-34→HJ-34P) → 계산 반영 + "확인필요"'],
+      ['검토상태 - 정상', '실패·추정·사이즈없음 모두 0 (연녹색)'],
+      ['검토상태 - 주의', '사이즈없음(0처리) 옵션이 존재 (연노랑)'],
+      ['검토상태 - 확인필요', '추정 매칭(옵션·추가상품) 또는 일부 옵션 매칭 실패 (연노랑)'],
+      ['검토상태 - 미반영', '상품의 모든 옵션이 매칭 실패하여 기존 재고 유지 (연주황)'],
+      ['검토 결과 요약', `총 상품 ${meta.productCount}개 (정상 ${meta.statusCounts.정상} / 주의 ${meta.statusCounts.주의} / 확인필요 ${meta.statusCounts.확인필요} / 미반영 ${meta.statusCounts.미반영} / 제외 ${meta.statusCounts.제외 || 0})`],
+      ['총 옵션 재고 합계 (M열 합)', `${meta.oldTotalSum.toLocaleString()} → ${meta.newTotalSum.toLocaleString()} (증감: ${meta.totalDiff >= 0 ? '+' : ''}${meta.totalDiff.toLocaleString()})`],
+      ['추가상품 현황', `${meta.totalAddonProducts}개 상품 / ${meta.totalAddonItems}개 항목 (실패 ${meta.totalAddonFail}, 추정 ${meta.totalAddonEstimate})`]
+    ];
+    for (const [k, v] of criteriaRows) {
+      const r = wsCriteria.addRow({ k, v });
+      applyRowStyle(r, null);
+      r.getCell(1).font = { name: '맑은 고딕', size: 10, bold: true };
+    }
+
+    // [시트 3] 상품별 요약 (§8.2)
+    const wsSummary = wb.addWorksheet('상품별 요약');
+    wsSummary.columns = [
+      { header: '상품번호', key: 'productNo', width: 16 },
+      { header: '상품명', key: 'productName', width: 45 },
+      { header: '기존 총재고', key: 'oldTotal', width: 13 },
+      { header: '변경 총재고', key: 'newTotal', width: 13 },
+      { header: '증감', key: 'diff', width: 12 },
+      { header: '검토상태', key: 'status', width: 14 },
+      { header: '실패 옵션', key: 'failOpts', width: 11 },
+      { header: '추정 옵션', key: 'estOpts', width: 11 },
+      { header: '사이즈없음', key: 'noSizeOpts', width: 11 },
+      { header: '추가상품 실패', key: 'addonFail', width: 13 },
+      { header: '추가상품 추정', key: 'addonEst', width: 13 },
+      { header: '매칭 방식', key: 'matchMethod', width: 24 },
+      { header: '매칭 재고 품목', key: 'matchedSummary', width: 38 }
+    ];
+    styleHeaderRow(wsSummary, 1);
+    wsSummary.views = [{ state: 'frozen', ySplit: 1 }];
+    wsSummary.autoFilter = 'A1:M1';
+
+    result.productSummaries.forEach((p, idx) => {
+      const rNum = idx + 2;
+      const row = wsSummary.addRow({
+        productNo: p.productNo,
+        productName: p.productName,
+        oldTotal: p.oldTotal,
+        newTotal: p.newTotal,
+        diff: { formula: `D${rNum}-C${rNum}`, result: p.newTotal - p.oldTotal },
+        status: p.status === '미반영' ? '미반영(매칭실패)' : p.status,
+        failOpts: p.failOpts,
+        estOpts: p.estOpts,
+        noSizeOpts: p.noSizeOpts,
+        addonFail: p.addonFail,
+        addonEst: p.addonEst,
+        matchMethod: p.matchMethod,
+        matchedSummary: p.matchedSummary
+      });
+      const fill = FILL[p.status] || null;
+      applyRowStyle(row, fill);
+      row.getCell(3).numFmt = '#,##0';
+      row.getCell(4).numFmt = '#,##0';
+      row.getCell(5).numFmt = '+#,##0;-#,##0;0';
+      row.getCell(6).alignment = { horizontal: 'center', vertical: 'middle' };
+    });
+
+    // [시트 4] 옵션별 상세 (§8.2)
+    const wsOpt = wb.addWorksheet('옵션별 상세');
+    wsOpt.columns = [
+      { header: '상품번호', key: 'productNo', width: 16 },
+      { header: '상품명', key: 'productName', width: 42 },
+      { header: '옵션값', key: 'optionValue', width: 22 },
+      { header: '기존 재고', key: 'oldStock', width: 12 },
+      { header: '변경 재고', key: 'newStock', width: 12 },
+      { header: '증감', key: 'diff', width: 11 },
+      { header: '매칭된 재고 품목', key: 'matchedItems', width: 38 },
+      { header: '매칭 내역', key: 'detail', width: 40 }
+    ];
+    styleHeaderRow(wsOpt, 1);
+    wsOpt.views = [{ state: 'frozen', ySplit: 1 }];
+    wsOpt.autoFilter = 'A1:H1';
+
+    result.optionDetails.forEach((o, idx) => {
+      const rNum = idx + 2;
+      const row = wsOpt.addRow({
+        productNo: o.productNo,
+        productName: o.productName,
+        optionValue: o.optionValue,
+        oldStock: o.oldStock,
+        newStock: o.newStock,
+        diff: { formula: `E${rNum}-D${rNum}`, result: o.newStock - o.oldStock },
+        matchedItems: o.matchedItems,
+        detail: o.detail
+      });
+      const fill = o.isFail ? FILL.미반영 : (o.isEstimate || o.isNoSize ? FILL.주의 : null);
+      applyRowStyle(row, fill);
+      row.getCell(4).numFmt = '#,##0';
+      row.getCell(5).numFmt = '#,##0';
+      row.getCell(6).numFmt = '+#,##0;-#,##0;0';
+    });
+
+    // [시트 5] 추가상품 상세 (§8.2)
+    const wsAddon = wb.addWorksheet('추가상품 상세');
+    wsAddon.columns = [
+      { header: '상품번호', key: 'productNo', width: 16 },
+      { header: '상품명', key: 'productName', width: 40 },
+      { header: '[그룹명] 값', key: 'label', width: 30 },
+      { header: '기존 재고', key: 'oldStock', width: 12 },
+      { header: '변경 재고', key: 'newStock', width: 12 },
+      { header: '증감', key: 'diff', width: 11 },
+      { header: '매칭된 재고 품목', key: 'matchedItems', width: 36 },
+      { header: '매칭 내역', key: 'detail', width: 40 }
+    ];
+    styleHeaderRow(wsAddon, 1);
+    wsAddon.views = [{ state: 'frozen', ySplit: 1 }];
+    wsAddon.autoFilter = 'A1:H1';
+
+    result.addonDetails.forEach((a, idx) => {
+      const rNum = idx + 2;
+      const row = wsAddon.addRow({
+        productNo: a.productNo,
+        productName: a.productName,
+        label: a.label,
+        oldStock: a.oldStock,
+        newStock: a.newStock,
+        diff: { formula: `E${rNum}-D${rNum}`, result: a.newStock - a.oldStock },
+        matchedItems: a.matchedItems,
+        detail: a.detail
+      });
+      const fill = a.isFail ? FILL.미반영 : (a.isEstimate ? FILL.주의 : null);
+      applyRowStyle(row, fill);
+      row.getCell(4).numFmt = '#,##0';
+      row.getCell(5).numFmt = '#,##0';
+      row.getCell(6).numFmt = '+#,##0;-#,##0;0';
+    });
+
+    const buffer = await wb.xlsx.writeBuffer();
+    return new Uint8Array(buffer);
+  }
+
+  /**
+   * 5. 네이버 업로드 실패 엑셀(error_excel_*.xlsx) 파싱 (§9)
+   * - A열: 실패사유, B열: 상품번호 (헤더 행 자동 스킵)
+   */
+  async function parseErrorExcel(arrayBuffer, deps = {}) {
+    const JSZipLib = getJSZip(deps.JSZip);
+    const zip = await JSZipLib.loadAsync(arrayBuffer);
+    const sheetInfo = await resolveSheetPath(zip, '일괄수정');
+    const ssFile = zip.file('xl/sharedStrings.xml');
+    const sharedStrings = ssFile ? parseSharedStrings(await ssFile.async('string')) : [];
+    const sheetXml = await zip.file(sheetInfo.sheetPath).async('string');
+    const rowsMap = parseSheetRows(sheetXml, sharedStrings);
+
+    const failedNos = new Set();
+    const reasonCounts = new Map();
+    const items = [];
+
+    const rowNumbers = Array.from(rowsMap.keys()).sort((a, b) => a - b);
+    for (const r of rowNumbers) {
+      const cells = rowsMap.get(r);
+      const colA = String(cells.get(1) || '').trim();
+      const colB = String(cells.get(2) || '').trim();
+      if (!colB || colB === '상품번호' || !/^\d+$/.test(colB)) continue;
+      failedNos.add(colB);
+      const reason = colA || '사유 미기재';
+      reasonCounts.set(reason, (reasonCounts.get(reason) || 0) + 1);
+      items.push({ productNo: colB, reason });
+    }
+
+    return {
+      failedNos,
+      items,
+      reasonCounts: Array.from(reasonCounts.entries()).map(([reason, count]) => ({ reason, count }))
+    };
+  }
+
+  /**
+   * 6. 오늘출발 가능수량 CSV / XLSX 파싱 (§9)
+   * - 컬럼: 상품번호, (선택)옵션값, 오늘출발수량(또는 가능수량/수량)
+   */
+  async function parseTodayShipFile(fileName, arrayBuffer, deps = {}) {
+    const map = new Map();
+    const lower = String(fileName || '').toLowerCase();
+
+    let rows = [];
+    if (lower.endsWith('.csv') || lower.endsWith('.txt')) {
+      const text = new TextDecoder('utf-8').decode(arrayBuffer).replace(/^\uFEFF/, '');
+      rows = text.split(/\r?\n/).filter(l => l.trim()).map(line => parseCsvLine(line));
+    } else {
+      const JSZipLib = getJSZip(deps.JSZip);
+      const zip = await JSZipLib.loadAsync(arrayBuffer);
+      const sheetInfo = await resolveSheetPath(zip, 'Sheet1');
+      const ssFile = zip.file('xl/sharedStrings.xml');
+      const sharedStrings = ssFile ? parseSharedStrings(await ssFile.async('string')) : [];
+      const sheetXml = await zip.file(sheetInfo.sheetPath).async('string');
+      const rowsMap = parseSheetRows(sheetXml, sharedStrings);
+      const rNums = Array.from(rowsMap.keys()).sort((a, b) => a - b);
+      for (const r of rNums) {
+        const c = rowsMap.get(r);
+        const maxCol = Math.max(0, ...Array.from(c.keys()));
+        const arr = [];
+        for (let i = 1; i <= maxCol; i++) arr.push(c.get(i) || '');
+        rows.push(arr);
+      }
+    }
+
+    if (rows.length === 0) return map;
+
+    const header = rows[0].map(h => String(h || '').replace(/\s+/g, ''));
+    let pnoIdx = header.findIndex(h => h.includes('상품번호'));
+    let optIdx = header.findIndex(h => h.includes('옵션'));
+    let qtyIdx = header.findIndex(h => h.includes('오늘출발') || h.includes('가능수량') || h.includes('수량'));
+
+    let startRow = 1;
+    if (pnoIdx === -1 && qtyIdx === -1) {
+      // 헤더 없는 단순 형식: [상품번호, 수량] 또는 [상품번호, 옵션값, 수량]
+      startRow = 0;
+      pnoIdx = 0;
+      if (rows[0].length >= 3) { optIdx = 1; qtyIdx = 2; }
+      else { optIdx = -1; qtyIdx = 1; }
+    }
+
+    for (let i = startRow; i < rows.length; i++) {
+      const r = rows[i];
+      const pno = String(r[pnoIdx] || '').trim();
+      const qty = parseInt(String(r[qtyIdx] || '').trim(), 10);
+      if (!pno || !Number.isFinite(qty) || qty <= 0) continue;
+      const opt = optIdx >= 0 ? String(r[optIdx] || '').trim() : '';
+      const key = opt ? `${pno}::${opt}` : pno;
+      map.set(key, Math.max(map.get(key) || 0, qty));
+    }
+
+    return map;
+  }
+
+  function parseCsvLine(line) {
+    const out = [];
+    let cur = '';
+    let inQuotes = false;
+    for (let i = 0; i < line.length; i++) {
+      const ch = line[i];
+      if (ch === '"') {
+        if (inQuotes && line[i + 1] === '"') { cur += '"'; i++; }
+        else inQuotes = !inQuotes;
+      } else if (ch === ',' && !inQuotes) {
+        out.push(cur);
+        cur = '';
+      } else {
+        cur += ch;
+      }
+    }
+    out.push(cur);
+    return out;
+  }
+
+  return {
+    colLettersToNum,
+    numToColLetters,
+    parseSmartStoreExcel,
+    verifyUpdatesIntegrity,
+    patchSmartStoreExcel,
+    buildUploadPackage,
+    generateReviewWorkbook,
+    parseErrorExcel,
+    parseTodayShipFile
+  };
+});

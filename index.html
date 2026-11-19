@@ -1,0 +1,510 @@
+<!DOCTYPE html>
+<html lang="ko">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>HJC 스마트스토어 재고 매칭 · 일괄수정 시스템</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link
+    href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Noto+Sans+KR:wght@300;400;500;600;700;800&display=swap"
+    rel="stylesheet">
+  <link rel="stylesheet" href="style.css">
+</head>
+
+<body class="theme-dark">
+  <div class="app-container">
+    <!-- 상단 헤더 -->
+    <header class="app-header">
+      <div class="header-main">
+        <div class="brand-section">
+          <div class="brand-badge">HJC SMARTSTORE</div>
+          <div>
+            <h1 class="app-title">스마트스토어 재고 매칭 · 일괄수정 프로그램</h1>
+            <p class="app-subtitle">브라우저 내 100% 로컬 처리 · 담당별 스토어 매핑 자동 저장</p>
+          </div>
+        </div>
+        <div class="header-actions">
+          <button id="openSettingsBtn" class="btn btn-secondary" title="매칭 규칙 및 수동 매핑 설정">
+            ⚙️ 설정 · 매핑 관리
+          </button>
+          <button id="exportConfigQuickBtn" class="btn btn-ghost" title="내 스토어 매핑 설정을 JSON 파일로 백업">
+            💾 설정 백업
+          </button>
+          <button id="themeToggleBtn" class="btn-icon" title="다크/라이트 테마 전환" aria-label="테마 전환">
+            <span id="themeIcon">☀️</span>
+          </button>
+        </div>
+      </div>
+
+      <!-- 1단계: HJC 통합 재고 데이터 연동 배너 -->
+      <section class="inventory-bar">
+        <div class="inventory-status-group">
+          <div class="sync-pill">
+            <span class="status-dot" id="invStatusDot"></span>
+            <span class="sync-pill-title" id="invStatusText">재고 데이터 미연동</span>
+          </div>
+          <div class="sync-meta" id="invMetaBadges">
+            <span class="meta-chip">🏪 매장: <strong id="metaStoreTime">-</strong></span>
+            <span class="meta-chip">🏢 본사: <strong id="metaHqTime">-</strong></span>
+            <span class="meta-chip">📦 품목: <strong id="metaItemCount">0</strong>건 (헬멧 Base <strong
+                id="metaBaseCount">0</strong>)</span>
+            <button id="refreshInvBtn" class="btn btn-secondary btn-xs" title="최신 재고 다시 불러오기">🔄 새로고침</button>
+          </div>
+        </div>
+      </section>
+    </header>
+
+    <!-- 2단계: 스마트스토어 엑셀 업로드 및 실행 -->
+    <section class="upload-section card">
+      <div class="upload-top-row">
+        <div id="excelDropZone" class="drop-zone" tabindex="0">
+          <input type="file" id="excelFileInput" accept=".xlsx" hidden>
+          <div class="drop-icon">📊</div>
+          <div class="drop-text">
+            <strong id="excelFileName">스마트스토어 일괄수정 엑셀(.xlsx)을 여기에 끌어다 놓거나 클릭하세요</strong>
+            <span id="excelFileSub">스마트스토어센터 &gt; 상품 일괄수정에서 내려받은 파일 (시트명: 일괄수정)</span>
+          </div>
+          <button type="button" id="clearExcelBtn" class="drop-clear-btn hidden" title="업로드된 파일 삭제"
+            aria-label="업로드된 파일 삭제">✕</button>
+        </div>
+
+        <button id="runMatchBtn" class="btn btn-accent run-match-btn" disabled>
+          ⚡ 재고 매칭 실행
+        </button>
+      </div>
+
+      <details class="aux-tools">
+        <summary>🛠️ 보조 도구: 오늘출발 가능수량 보정 / 업로드 실패 엑셀 재추출</summary>
+        <div class="aux-tools-body">
+          <div class="aux-item">
+            <div class="aux-info">
+              <strong>① 오늘출발 가능수량 하한 보정 (선택)</strong>
+              <span>상품번호, (선택)옵션값, 오늘출발수량 CSV/XLSX 업로드 시 해당 수량 미만으로 내려가지 않게 보정</span>
+            </div>
+            <div class="aux-controls">
+              <label class="btn btn-secondary btn-xs file-btn-label">
+                파일 선택
+                <input type="file" id="todayShipFileInput" accept=".csv,.xlsx,.txt" hidden>
+              </label>
+              <label class="checkbox-label">
+                <input type="checkbox" id="applyTodayShipCheck">
+                <span>보정 적용</span>
+              </label>
+              <span id="todayShipStatus" class="aux-status">미등록</span>
+            </div>
+          </div>
+
+          <div class="aux-item">
+            <div class="aux-info">
+              <strong>② 네이버 업로드 실패 엑셀 재추출 (§9)</strong>
+              <span><code>error_excel_*.xlsx</code>(B열 상품번호) 업로드 시 실패 상품만 추린 재업로드 엑셀 생성</span>
+            </div>
+            <div class="aux-controls">
+              <label class="btn btn-secondary btn-xs file-btn-label">
+                실패 엑셀 선택
+                <input type="file" id="errorExcelFileInput" accept=".xlsx" hidden>
+              </label>
+              <button id="downloadRetryExcelBtn" class="btn btn-primary btn-xs" disabled>재업로드 엑셀 받기</button>
+              <span id="errorExcelStatus" class="aux-status">미등록</span>
+            </div>
+          </div>
+        </div>
+      </details>
+    </section>
+
+    <!-- 헤더/무결성 경고 영역 -->
+    <div id="alertContainer" class="alert-container hidden"></div>
+
+    <!-- 3단계: 매칭 결과 대시보드 & 다운로드 -->
+    <section id="resultSection" class="result-section hidden">
+      <!-- 다운로드 액션 바 -->
+      <div class="download-bar card">
+        <div class="download-summary">
+          <div class="download-title">✅ 매칭 완료 — 원본 서식 유지 업로드 파일 &amp; 검토표 준비됨</div>
+          <div class="download-meta" id="resultMetaSummary">-</div>
+        </div>
+        <div class="download-buttons">
+          <button id="downloadUploadExcelBtn" class="btn btn-success btn-lg">
+            ⬇️ 재고수정용 엑셀 다운로드 (업로드용)
+          </button>
+          <button id="downloadReviewExcelBtn" class="btn btn-primary btn-lg">
+            📑 검토표 엑셀 다운로드 (5개 시트)
+          </button>
+        </div>
+      </div>
+
+      <!-- KPI 통계 카드 -->
+      <div class="kpi-grid">
+        <div class="kpi-card">
+          <span class="kpi-label">전체 상품 / 옵션</span>
+          <div class="kpi-value" id="kpiTotalProducts">0 / 0</div>
+          <span class="kpi-sub" id="kpiAddonsSub">추가상품 0개 상품 (0항목)</span>
+        </div>
+        <div class="kpi-card kpi-ok">
+          <span class="kpi-label">정상 매칭</span>
+          <div class="kpi-value" id="kpiOkCount">0</div>
+          <span class="kpi-sub">이슈 없음</span>
+        </div>
+        <div class="kpi-card kpi-warn">
+          <span class="kpi-label">주의 (사이즈없음)</span>
+          <div class="kpi-value" id="kpiWarnCount">0</div>
+          <span class="kpi-sub">미등록 사이즈 0 처리</span>
+        </div>
+        <div class="kpi-card kpi-check">
+          <span class="kpi-label">확인필요 (추정/부분실패)</span>
+          <div class="kpi-value" id="kpiCheckCount">0</div>
+          <span class="kpi-sub">추정 매칭·추가상품 확인</span>
+        </div>
+        <div class="kpi-card kpi-fail">
+          <span class="kpi-label">미반영 (매칭실패)</span>
+          <div class="kpi-value" id="kpiFailCount">0</div>
+          <span class="kpi-sub">기존 재고 유지됨</span>
+        </div>
+        <div class="kpi-card kpi-stock">
+          <span class="kpi-label">총 옵션 재고 합계 (M열)</span>
+          <div class="kpi-value" id="kpiStockChange">0 → 0</div>
+          <span class="kpi-sub" id="kpiStockDiff">증감 0</span>
+        </div>
+      </div>
+
+      <!-- 별칭 자동 학습 후보 바 (§12.6) -->
+      <div id="aliasLearnBar" class="alias-learn-bar card hidden">
+        <div class="alias-learn-header">
+          <strong>💡 별칭 자동 학습 후보 발견 (§12.6)</strong>
+          <span>MC코드 확정 매칭 중 발견된 표기 차이입니다. 승인하면 다음 실행부터 키워드 점수에 자동 반영됩니다.</span>
+        </div>
+        <div id="aliasLearnList" class="alias-chip-list"></div>
+      </div>
+
+      <!-- 결과 탭 네비게이션 -->
+      <div class="tabs-card card">
+        <div class="tabs-header">
+          <div class="tab-buttons" role="tablist">
+            <button class="tab-btn active" data-tab="queue">
+              🔍 확인 큐 <span class="tab-badge badge-warn" id="badgeQueue">0</span>
+            </button>
+            <button class="tab-btn" data-tab="summary">
+              📋 상품별 요약 <span class="tab-badge" id="badgeSummary">0</span>
+            </button>
+            <button class="tab-btn" data-tab="options">
+              🧩 옵션별 상세 <span class="tab-badge" id="badgeOptions">0</span>
+            </button>
+            <button class="tab-btn" data-tab="addons">
+              ➕ 추가상품 상세 <span class="tab-badge" id="badgeAddons">0</span>
+            </button>
+            <button class="tab-btn" data-tab="drops">
+              ⚠️ 오늘출발 주의 <span class="tab-badge badge-danger" id="badgeDrops">0</span>
+            </button>
+          </div>
+
+          <div class="tab-filters">
+            <input type="text" id="tableSearchInput" class="text-input input-sm" placeholder="상품번호·상품명·옵션 검색...">
+            <select id="statusFilterSelect" class="select-input input-sm">
+              <option value="all">전체 상태</option>
+              <option value="정상">정상</option>
+              <option value="주의">주의</option>
+              <option value="확인필요">확인필요</option>
+              <option value="미반영">미반영</option>
+              <option value="제외">제외</option>
+            </select>
+          </div>
+        </div>
+
+        <!-- 탭 1: 확인 큐 -->
+        <div id="tab-queue" class="tab-pane active">
+          <div class="pane-notice">
+            <div>
+              미매칭·추정 매칭·사이즈 없음 항목을 모았습니다. 추천 후보를 클릭하거나 <strong>직접 검색</strong>으로 확정하면 내 스토어 매핑(<code>manual_map</code> /
+              <code>option_manual_map</code>)에 저장되고 즉시 재계산됩니다.
+            </div>
+            <button id="bulkConfirmSizesBtn" class="btn btn-success btn-sm hidden">✅ '사이즈 없음' 0건 일괄 확인 완료</button>
+          </div>
+          <div class="table-wrapper">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th style="width:120px">구분</th>
+                  <th style="width:125px">상품번호</th>
+                  <th>상품명 / 대상</th>
+                  <th style="width:200px">사유 / 기본 처리</th>
+                  <th style="width:390px">추천 후보 (클릭 시 확정) · 직접 지정</th>
+                </tr>
+              </thead>
+              <tbody id="queueTableBody"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- 탭 2: 상품별 요약 -->
+        <div id="tab-summary" class="tab-pane">
+          <div class="table-wrapper">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th style="width:125px">상품번호</th>
+                  <th>상품명</th>
+                  <th style="width:90px" class="num">기존</th>
+                  <th style="width:90px" class="num">변경</th>
+                  <th style="width:90px" class="num">증감</th>
+                  <th style="width:95px">상태</th>
+                  <th style="width:170px">이슈 (실패/추정/사이즈/추가)</th>
+                  <th style="width:220px">매칭 재고 품목</th>
+                  <th style="width:140px">작업</th>
+                </tr>
+              </thead>
+              <tbody id="summaryTableBody"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- 탭 3: 옵션별 상세 -->
+        <div id="tab-options" class="tab-pane">
+          <div class="table-wrapper">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th style="width:125px">상품번호</th>
+                  <th>상품명</th>
+                  <th style="width:160px">옵션값</th>
+                  <th style="width:80px" class="num">기존</th>
+                  <th style="width:80px" class="num">변경</th>
+                  <th style="width:80px" class="num">증감</th>
+                  <th style="width:240px">매칭된 재고 품목</th>
+                  <th style="width:250px">매칭 내역</th>
+                </tr>
+              </thead>
+              <tbody id="optionsTableBody"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- 탭 4: 추가상품 상세 -->
+        <div id="tab-addons" class="tab-pane">
+          <div class="table-wrapper">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th style="width:125px">상품번호</th>
+                  <th>상품명</th>
+                  <th style="width:200px">[그룹명] 값</th>
+                  <th style="width:75px" class="num">기존</th>
+                  <th style="width:75px" class="num">변경</th>
+                  <th style="width:75px" class="num">증감</th>
+                  <th style="width:220px">매칭된 재고 품목</th>
+                  <th style="width:230px">매칭 내역</th>
+                  <th style="width:95px">고정재고</th>
+                </tr>
+              </thead>
+              <tbody id="addonsTableBody"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- 탭 5: 오늘출발 주의 -->
+        <div id="tab-drops" class="tab-pane">
+          <div class="pane-notice warn-notice">
+            <div>
+              <strong>⚠️ 오늘출발 가능수량 오류 예방 안내 (§9)</strong><br>
+              재고가 기존 대비 크게 감소(<span id="dropThresholdLabel">50</span>% 이상)한 상품입니다. 네이버 스마트스토어센터에 설정된 <em>오늘출발
+                가능수량</em>보다 새 재고가 작으면 업로드가 실패하므로, 사전 조정을 권장합니다.
+            </div>
+            <button id="copyDropNosBtn" class="btn btn-secondary btn-sm">📋 상품번호 일괄 복사</button>
+          </div>
+          <div class="table-wrapper">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th style="width:130px">상품번호</th>
+                  <th>상품명</th>
+                  <th style="width:100px" class="num">기존 재고</th>
+                  <th style="width:100px" class="num">변경 재고</th>
+                  <th style="width:100px" class="num">증감</th>
+                  <th style="width:100px" class="num">감소율</th>
+                  <th style="width:100px">검토상태</th>
+                </tr>
+              </thead>
+              <tbody id="dropsTableBody"></tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <!-- 모달 1: 재고 직접 검색 & 수동 매핑 선택 -->
+  <div id="manualPickModal" class="modal-backdrop hidden" role="dialog" aria-modal="true">
+    <div class="modal-dialog">
+      <div class="modal-header">
+        <h3>🔎 재고 품목 직접 검색 및 매핑 지정</h3>
+        <button class="modal-close" data-close-modal="manualPickModal">&times;</button>
+      </div>
+      <div class="modal-body">
+        <div class="pick-target-info" id="pickTargetInfo"></div>
+        <div id="pickBulkOptionRow" class="pick-bulk-row hidden">
+          <label class="checkbox-label">
+            <input type="checkbox" id="pickBulkCheck" checked>
+            <span id="pickBulkLabel">같은 표기의 옵션/추가상품 전체에 일괄 적용</span>
+          </label>
+        </div>
+        <div class="pick-search-row">
+          <input type="text" id="pickSearchInput" class="text-input"
+            placeholder="재고명 검색 (띄어쓰기로 다중 키워드, 예: 알파12 베놈 MC8)">
+          <select id="pickTypeFilter" class="select-input" style="width:140px">
+            <option value="helmet">헬멧 Base</option>
+            <option value="all">전체 재고 품목</option>
+          </select>
+        </div>
+        <div class="pick-selected-bar">
+          <span>선택된 항목 (복수 선택 시 재고 합산):</span>
+          <div id="pickSelectedChips" class="chip-list"></div>
+        </div>
+        <div id="pickResultList" class="pick-result-list"></div>
+      </div>
+      <div class="modal-footer">
+        <button id="clearManualMapBtn" class="btn btn-danger btn-sm">수동 매핑 해제 (기존유지·정상처리)</button>
+        <div class="spacer"></div>
+        <button class="btn btn-secondary" data-close-modal="manualPickModal">취소</button>
+        <button id="confirmManualPickBtn" class="btn btn-primary">저장 후 즉시 재계산</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 모달 2: 설정 및 매핑 관리 (§12.5) -->
+  <div id="settingsModal" class="modal-backdrop hidden" role="dialog" aria-modal="true">
+    <div class="modal-dialog modal-lg">
+      <div class="modal-header">
+        <h3>⚙️ 설정 · 매핑 테이블 관리 (내 브라우저에 자동 저장)</h3>
+        <button class="modal-close" data-close-modal="settingsModal">&times;</button>
+      </div>
+      <div class="modal-tabs">
+        <button class="modal-tab-btn active" data-mtab="basic">기본 · 모델 · 별칭</button>
+        <button class="modal-tab-btn" data-mtab="maps">수동매핑 · 고정재고 · 제외</button>
+        <button class="modal-tab-btn" data-mtab="json">JSON 백업 · 복원 · 직접편집</button>
+      </div>
+      <div class="modal-body">
+        <!-- 설정 탭 1 -->
+        <div id="mtab-basic" class="modal-tab-pane active">
+          <div class="form-grid-2">
+            <div class="form-group">
+              <label>재고조회 JSON URL (자동 연동 주소)</label>
+              <div style="display:flex;gap:6px;align-items:center">
+                <input type="url" id="cfgInventoryUrl" class="text-input" placeholder="https://.../inventory_data.json">
+                <label class="btn btn-secondary btn-sm file-btn-label" title="PC에서 inventory_data.json 직접 열기">
+                  📂 파일열기
+                  <input type="file" id="inventoryFileInput" accept=".json" hidden>
+                </label>
+              </div>
+            </div>
+            <div class="form-group">
+              <label>본사 가용 기본 재고 (HQ_DEFAULT)</label>
+              <input type="number" id="cfgHqDefault" class="text-input" min="0" value="100">
+            </div>
+            <div class="form-group">
+              <label>오늘출발 대폭감소 경고 임계치 (%)</label>
+              <input type="number" id="cfgDropPct" class="text-input" min="1" max="100" value="50">
+            </div>
+            <div class="form-group">
+              <label>수동 추가 모델 (쉼표 구분, 예: 알파13, C20)</label>
+              <input type="text" id="cfgModelsExtra" class="text-input" placeholder="알파13">
+            </div>
+          </div>
+
+          <div class="form-group">
+            <label>별칭 사전 (<code>aliases</code> — 한 줄에 하나씩 <code>스토어표기=재고표기</code>)</label>
+            <textarea id="cfgAliases" class="code-textarea" rows="5" placeholder="과타라로=콰타라로&#10;로윈=라윈"></textarea>
+          </div>
+          <div class="form-grid-2">
+            <div class="form-group">
+              <label>색상 동의어 (<code>color_synonyms</code> — <code>스토어=표준</code>)</label>
+              <textarea id="cfgColorSynonyms" class="code-textarea" rows="5"></textarea>
+            </div>
+            <div class="form-group">
+              <label>색상 추정 대체 (<code>color_fallback</code> — <code>원색상=대체색상</code>)</label>
+              <textarea id="cfgColorFallback" class="code-textarea" rows="5"></textarea>
+            </div>
+          </div>
+        </div>
+
+        <!-- 설정 탭 2 -->
+        <div id="mtab-maps" class="modal-tab-pane">
+          <div class="form-group">
+            <label>상품번호 기준 수동 매핑 (<code>manual_map</code> — 한 줄에 <code>상품번호=재고Base1 | 재고Base2</code>)</label>
+            <textarea id="cfgManualMap" class="code-textarea" rows="6"
+              placeholder="13297488781=HJC 헬멧 알파12 안티 베놈2 마블 MC8"></textarea>
+          </div>
+          <div class="form-group">
+            <label>상품명 포함 문자열 수동 매핑 (<code>manual_map_by_name</code> — <code>포함문자열=재고Base</code>)</label>
+            <textarea id="cfgManualMapByName" class="code-textarea" rows="3"
+              placeholder="안티 베놈 2 ANTI VENOM=HJC 헬멧 알파12 안티 베놈2 마블 MC8"></textarea>
+          </div>
+          <div class="form-group">
+            <label>옵션·추가상품 수동 매핑 (<code>option_manual_map</code> — <code>공통::라벨=재고품목명</code> 또는
+              <code>상품번호::라벨=재고품목명</code>)</label>
+            <textarea id="cfgOptionManualMap" class="code-textarea" rows="3"
+              placeholder="공통::[기어판 추가] 기어판 (HJ-34)=HJC C10(HJ-34P) 기어판"></textarea>
+          </div>
+          <div class="form-group">
+            <label>0 처리 확인 완료된 미존재 사이즈 (<code>confirmed_missing_sizes</code> — <code>상품번호=XS | S</code>)</label>
+            <textarea id="cfgConfirmedMissingSizes" class="code-textarea" rows="3"
+              placeholder="12863764039=XS | S"></textarea>
+          </div>
+          <div class="form-grid-2">
+            <div class="form-group">
+              <label>고정 재고 예외 (<code>fixed_stock</code> — <code>키=수량</code>)</label>
+              <textarea id="cfgFixedStock" class="code-textarea" rows="5"
+                placeholder="추가상품:i40(XD-15) 사이드커버=0"></textarea>
+            </div>
+            <div class="form-group">
+              <label>매칭 해제(제외) 상품번호 (<code>ignore_products</code> — 한 줄에 하나, 기존재고 유지·정상처리)</label>
+              <textarea id="cfgIgnoreProducts" class="code-textarea" rows="4" placeholder="1234567890"></textarea>
+            </div>
+          </div>
+          <div class="form-group">
+            <label>매칭 해제(제외) 옵션·추가상품 (<code>ignored_options</code> — <code>공통::라벨</code> 또는
+              <code>상품번호::라벨</code>)</label>
+            <textarea id="cfgIgnoredOptions" class="code-textarea" rows="3"
+              placeholder="공통::[기어판 추가] 기어판 (HJ-34)"></textarea>
+          </div>
+        </div>
+
+        <!-- 설정 탭 3 -->
+        <div id="mtab-json" class="modal-tab-pane">
+          <div class="json-toolbar">
+            <button id="cfgExportJsonBtn" class="btn btn-secondary btn-sm">📤 JSON 파일로 내보내기</button>
+            <label class="btn btn-secondary btn-sm file-btn-label">
+              📥 JSON 파일 불러오기
+              <input type="file" id="cfgImportJsonInput" accept=".json" hidden>
+            </label>
+            <button id="cfgResetBtn" class="btn btn-danger btn-sm">♻️ 팀 기본값으로 초기화</button>
+          </div>
+          <div class="form-group">
+            <label>전체 설정 JSON 원본 (고급 편집)</label>
+            <textarea id="cfgRawJson" class="code-textarea" rows="15"></textarea>
+          </div>
+        </div>
+      </div>
+      <div class="modal-footer">
+        <span class="footer-note">저장 시 현재 브라우저에 영구 반영되며, 업로드된 엑셀이 있으면 즉시 재계산됩니다.</span>
+        <button class="btn btn-secondary" data-close-modal="settingsModal">닫기</button>
+        <button id="saveSettingsBtn" class="btn btn-primary">설정 저장 및 적용</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 토스트 알림 -->
+  <div id="toast" class="toast hidden"></div>
+
+  <!-- 라이브러리 CDN (GitHub Pages 정적 호스팅 호환) -->
+  <script src="https://cdn.jsdelivr.net/npm/jszip@3.10.1/dist/jszip.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js"></script>
+
+  <!-- 앱 스크립트 -->
+  <script src="js/config.js"></script>
+  <script src="js/matcher.js"></script>
+  <script src="js/excel_handler.js"></script>
+  <script src="js/app.js"></script>
+</body>
+
+</html>

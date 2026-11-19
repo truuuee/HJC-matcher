@@ -1,0 +1,37 @@
+{
+  "inventory_url": "https://truuuee.github.io/HJC-inventory/",
+  "hq_default_stock": 100,
+  "drop_warning_percent": 50,
+  "models_extra": [
+    "알파13"
+  ],
+  "aliases": {
+    "과타라로": "콰타라로",
+    "로윈": "라윈",
+    "퀘이즈": "퀘즈"
+  },
+  "color_synonyms": {
+    "앤그레이": "엔그레이",
+    "러버톤무광블랙": "플랫블랙",
+    "러버톤플랫블랙": "플랫블랙",
+    "리얼펄화이트": "펄화이트",
+    "리얼화이트": "펄화이트",
+    "무광블랙": "매트블랙"
+  },
+  "color_fallback": {
+    "화이트": "펄화이트",
+    "플랫블랙": "세미플랫블랙",
+    "매트블랙": "세미플랫블랙"
+  },
+  "manual_map": {},
+  "manual_map_by_name": {
+    "안티 베놈 2 ANTI VENOM": [
+      "HJC 헬멧 알파12 안티 베놈2 마블 MC8"
+    ]
+  },
+  "option_manual_map": {},
+  "confirmed_missing_sizes": {},
+  "fixed_stock": {},
+  "ignore_products": [],
+  "ignored_options": []
+}
