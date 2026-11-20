@@ -10,7 +10,7 @@
   <link
     href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Noto+Sans+KR:wght@300;400;500;600;700;800&display=swap"
     rel="stylesheet">
-  <link rel="stylesheet" href="style.css">
+  <link rel="stylesheet" href="style.css?v=3">
 </head>
 
 <body class="theme-dark">
@@ -197,6 +197,9 @@
             <button class="tab-btn" data-tab="drops">
               ⚠️ 오늘출발 주의 <span class="tab-badge badge-danger" id="badgeDrops">0</span>
             </button>
+            <button class="tab-btn" data-tab="manual">
+              📝 수동 매핑 내역 <span class="tab-badge badge-info" id="badgeManual">0</span>
+            </button>
           </div>
 
           <div class="tab-filters">
@@ -219,7 +222,10 @@
               미매칭·추정 매칭·사이즈 없음 항목을 모았습니다. 추천 후보를 클릭하거나 <strong>직접 검색</strong>으로 확정하면 내 스토어 매핑(<code>manual_map</code> /
               <code>option_manual_map</code>)에 저장되고 즉시 재계산됩니다.
             </div>
-            <button id="bulkConfirmSizesBtn" class="btn btn-success btn-sm hidden">✅ '사이즈 없음' 0건 일괄 확인 완료</button>
+            <div class="pane-actions">
+              <button id="undoActionBtn" class="btn btn-secondary btn-sm hidden" title="직전 매핑/해제 작업을 이전 상태로 되돌립니다">↩️ 방금 작업 되돌리기</button>
+              <button id="bulkConfirmSizesBtn" class="btn btn-success btn-sm hidden">✅ '사이즈 없음' 0건 일괄 확인 완료</button>
+            </div>
           </div>
           <div class="table-wrapper">
             <table class="data-table">
@@ -326,6 +332,42 @@
                 </tr>
               </thead>
               <tbody id="dropsTableBody"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- 탭 6: 수동 매핑 내역 (조회 · 개별 삭제) -->
+        <div id="tab-manual" class="tab-pane">
+          <div class="pane-notice">
+            <div>
+              <strong>📝 내 브라우저에 저장된 수동 매핑 · 확인완료 · 매칭해제 전체 내역</strong><br>
+              실수로 잘못 매칭한 항목의 <strong>↩️ 매핑 삭제</strong>를 누르면 즉시 해제되어 원래 자동 매칭 또는 <strong>확인 큐</strong>로 되돌아갑니다.
+            </div>
+            <div class="pane-actions">
+              <select id="manualTypeFilter" class="select-input input-sm">
+                <option value="all">전체 유형</option>
+                <option value="manual_map">상품 수동 매핑</option>
+                <option value="option_manual_map">옵션·추가상품 매핑</option>
+                <option value="confirmed_missing_sizes">사이즈없음 확인</option>
+                <option value="ignore_products">상품 매칭 해제</option>
+                <option value="ignored_options">옵션·추가상품 해제</option>
+              </select>
+              <button id="undoActionBtnManual" class="btn btn-secondary btn-sm hidden">↩️ 방금 작업 되돌리기</button>
+              <button id="clearAllManualBtn" class="btn btn-danger btn-sm">🗑️ 수동 매핑 전체 삭제</button>
+            </div>
+          </div>
+          <div class="table-wrapper">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th style="width:140px">유형</th>
+                  <th style="width:145px">상품번호 / 범위</th>
+                  <th>상품명 / 대상</th>
+                  <th style="width:320px">저장된 매핑 · 처리 내용</th>
+                  <th style="width:130px">되돌리기</th>
+                </tr>
+              </thead>
+              <tbody id="manualTableBody"></tbody>
             </table>
           </div>
         </div>
@@ -501,10 +543,10 @@
   <script src="https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js"></script>
 
   <!-- 앱 스크립트 -->
-  <script src="config.js?v=2"></script>
-  <script src="matcher.js?v=2"></script>
-  <script src="excel_handler.js?v=2"></script>
-  <script src="app.js?v=2"></script>
+  <script src="config.js?v=3"></script>
+  <script src="matcher.js?v=3"></script>
+  <script src="excel_handler.js?v=3"></script>
+  <script src="app.js?v=3"></script>
 </body>
 
 </html>

@@ -22,6 +22,8 @@
     activeTab: 'queue',
     searchQuery: '',
     statusFilter: 'all',
+    manualTypeFilter: 'all',
+    undoStack: [],
     pickContext: null,
     pickSelected: []
   };
@@ -79,9 +81,14 @@
     badgeOptions: document.getElementById('badgeOptions'),
     badgeAddons: document.getElementById('badgeAddons'),
     badgeDrops: document.getElementById('badgeDrops'),
+    badgeManual: document.getElementById('badgeManual'),
     dropThresholdLabel: document.getElementById('dropThresholdLabel'),
     copyDropNosBtn: document.getElementById('copyDropNosBtn'),
     bulkConfirmSizesBtn: document.getElementById('bulkConfirmSizesBtn'),
+    undoActionBtn: document.getElementById('undoActionBtn'),
+    undoActionBtnManual: document.getElementById('undoActionBtnManual'),
+    manualTypeFilter: document.getElementById('manualTypeFilter'),
+    clearAllManualBtn: document.getElementById('clearAllManualBtn'),
 
     tableSearchInput: document.getElementById('tableSearchInput'),
     statusFilterSelect: document.getElementById('statusFilterSelect'),
@@ -91,6 +98,7 @@
     optionsTableBody: document.getElementById('optionsTableBody'),
     addonsTableBody: document.getElementById('addonsTableBody'),
     dropsTableBody: document.getElementById('dropsTableBody'),
+    manualTableBody: document.getElementById('manualTableBody'),
 
     manualPickModal: document.getElementById('manualPickModal'),
     pickTargetInfo: document.getElementById('pickTargetInfo'),
@@ -138,11 +146,46 @@
   }
 
   let toastTimer = null;
-  function showToast(msg, ms = 3200) {
-    el.toast.textContent = msg;
+  function showToast(msg, ms = 3200, opts = {}) {
+    const allowUndo = Boolean(opts && opts.allowUndo && state.undoStack.length > 0);
+    el.toast.innerHTML = `<span>${esc(msg)}</span>` + (allowUndo ? `<button type="button" class="toast-undo-btn" id="toastUndoBtn">↩️ 되돌리기</button>` : '');
+    if (allowUndo) {
+      const btn = el.toast.querySelector('#toastUndoBtn');
+      if (btn) btn.addEventListener('click', () => undoLastAction());
+    }
     el.toast.classList.remove('hidden');
     clearTimeout(toastTimer);
-    toastTimer = setTimeout(() => el.toast.classList.add('hidden'), ms);
+    toastTimer = setTimeout(() => el.toast.classList.add('hidden'), allowUndo ? Math.max(ms, 5000) : ms);
+  }
+
+  function pushUndoSnapshot(label) {
+    if (!state.config) return;
+    state.undoStack.push({
+      label: label || '직전 작업',
+      snapshot: Config.deepClone(state.config)
+    });
+    if (state.undoStack.length > 20) state.undoStack.shift();
+    updateUndoButtons();
+  }
+
+  function updateUndoButtons() {
+    const hasUndo = state.undoStack.length > 0;
+    const last = hasUndo ? state.undoStack[state.undoStack.length - 1] : null;
+    [el.undoActionBtn, el.undoActionBtnManual].forEach(btn => {
+      if (!btn) return;
+      btn.classList.toggle('hidden', !hasUndo);
+      if (last) btn.title = `되돌리기: ${last.label}`;
+    });
+  }
+
+  function undoLastAction() {
+    if (state.undoStack.length === 0) return;
+    const prev = state.undoStack.pop();
+    state.config = prev.snapshot;
+    Config.saveConfig(state.config);
+    updateUndoButtons();
+    if (state.lastResult) executeMatching();
+    showToast(`↩️ '${prev.label}' 작업을 되돌렸습니다.`);
   }
 
   function todayYYYYMMDD() {
@@ -627,6 +670,131 @@
         </tr>
       `).join('');
     }
+
+    // 6. 수동 매핑 내역 (조회 · 개별 삭제)
+    renderManualHistoryTable(res, q);
+  }
+
+  function buildManualHistoryRows(res) {
+    const c = state.config || {};
+    const nameByPno = new Map();
+    if (res && Array.isArray(res.productSummaries)) {
+      for (const p of res.productSummaries) nameByPno.set(String(p.productNo), p.productName);
+    }
+
+    const rows = [];
+
+    // 1) 상품 수동 매핑 (manual_map)
+    for (const [pno, bases] of Object.entries(c.manual_map || {})) {
+      const targetStr = Array.isArray(bases) ? bases.join(' + ') : String(bases || '');
+      rows.push({
+        type: 'manual_map',
+        typeLabel: '상품 수동 매핑',
+        badgeCls: 'badge-ok',
+        key: pno,
+        scope: pno,
+        name: nameByPno.get(String(pno)) || '(현재 엑셀 외 저장 상품)',
+        detail: targetStr
+      });
+    }
+
+    // 2) 옵션·추가상품 수동 매핑 (option_manual_map)
+    for (const [mapKey, items] of Object.entries(c.option_manual_map || {})) {
+      const sepIdx = mapKey.indexOf('::');
+      const scopePart = sepIdx >= 0 ? mapKey.slice(0, sepIdx) : '공통';
+      const labelPart = sepIdx >= 0 ? mapKey.slice(sepIdx + 2) : mapKey;
+      const isCommon = scopePart === '공통';
+      const targetStr = Array.isArray(items) ? items.join(' + ') : String(items || '');
+      rows.push({
+        type: 'option_manual_map',
+        typeLabel: '옵션·추가상품 매핑',
+        badgeCls: 'badge-ok',
+        key: mapKey,
+        scope: isCommon ? '공통 전체' : scopePart,
+        name: isCommon
+          ? `대상: ${labelPart}`
+          : `${nameByPno.get(scopePart) || '(현재 엑셀 외 상품)'} · 대상: ${labelPart}`,
+        detail: targetStr
+      });
+    }
+
+    // 3) 사이즈없음 확인 완료 (confirmed_missing_sizes)
+    for (const [pno, sizes] of Object.entries(c.confirmed_missing_sizes || {})) {
+      const szStr = Array.isArray(sizes) ? sizes.join(', ') : String(sizes || '');
+      rows.push({
+        type: 'confirmed_missing_sizes',
+        typeLabel: '사이즈없음 확인',
+        badgeCls: 'badge-warn-pill',
+        key: pno,
+        scope: pno,
+        name: nameByPno.get(String(pno)) || '(현재 엑셀 외 저장 상품)',
+        detail: `미존재 사이즈 0 처리 확인: ${szStr}`
+      });
+    }
+
+    // 4) 상품 매칭 해제 (ignore_products)
+    for (const pno of (c.ignore_products || [])) {
+      rows.push({
+        type: 'ignore_products',
+        typeLabel: '상품 매칭 해제',
+        badgeCls: 'badge-dim',
+        key: String(pno),
+        scope: String(pno),
+        name: nameByPno.get(String(pno)) || '(현재 엑셀 외 저장 상품)',
+        detail: '기존 재고 유지 (정상 처리)'
+      });
+    }
+
+    // 5) 옵션·추가상품 매칭 해제 (ignored_options)
+    for (const optKey of (c.ignored_options || [])) {
+      const sepIdx = optKey.indexOf('::');
+      const scopePart = sepIdx >= 0 ? optKey.slice(0, sepIdx) : '공통';
+      const labelPart = sepIdx >= 0 ? optKey.slice(sepIdx + 2) : optKey;
+      const isCommon = scopePart === '공통';
+      rows.push({
+        type: 'ignored_options',
+        typeLabel: '옵션·추가상품 해제',
+        badgeCls: 'badge-dim',
+        key: optKey,
+        scope: isCommon ? '공통 전체' : scopePart,
+        name: isCommon
+          ? `대상: ${labelPart}`
+          : `${nameByPno.get(scopePart) || '(현재 엑셀 외 상품)'} · 대상: ${labelPart}`,
+        detail: '기존 재고 유지 (정상 처리)'
+      });
+    }
+
+    return rows;
+  }
+
+  function renderManualHistoryTable(res, q) {
+    const allRows = buildManualHistoryRows(res);
+    if (el.badgeManual) el.badgeManual.textContent = allRows.length;
+
+    const typeFilter = state.manualTypeFilter || 'all';
+    const filtered = allRows.filter(r => {
+      if (typeFilter !== 'all' && r.type !== typeFilter) return false;
+      return matchesSearch([r.typeLabel, r.scope, r.name, r.detail], q);
+    });
+
+    if (filtered.length === 0) {
+      el.manualTableBody.innerHTML = `<tr><td colspan="5" class="empty-row">${allRows.length === 0 ? '저장된 수동 매핑·해제 내역이 없습니다.' : '검색/필터 조건에 맞는 수동 매핑 내역이 없습니다.'}</td></tr>`;
+      return;
+    }
+
+    el.manualTableBody.innerHTML = filtered.map(r => `
+      <tr>
+        <td><span class="badge ${r.badgeCls}">${esc(r.typeLabel)}</span></td>
+        <td><code>${esc(r.scope)}</code></td>
+        <td><strong>${esc(r.name)}</strong></td>
+        <td><span class="sub-text" style="margin:0;color:var(--text-main)">${esc(r.detail)}</span></td>
+        <td>
+          <button class="btn btn-danger btn-xs"
+            data-delete-manual-type="${esc(r.type)}"
+            data-delete-manual-key="${esc(r.key)}">↩️ 매핑 삭제</button>
+        </td>
+      </tr>
+    `).join('');
   }
 
   // 수동 매핑 직접 검색 모달
@@ -1008,6 +1176,33 @@
       state.statusFilter = e.target.value;
       renderActiveTabTables();
     });
+    if (el.manualTypeFilter) {
+      el.manualTypeFilter.addEventListener('change', (e) => {
+        state.manualTypeFilter = e.target.value;
+        renderActiveTabTables();
+      });
+    }
+    if (el.undoActionBtn) el.undoActionBtn.addEventListener('click', undoLastAction);
+    if (el.undoActionBtnManual) el.undoActionBtnManual.addEventListener('click', undoLastAction);
+    if (el.clearAllManualBtn) {
+      el.clearAllManualBtn.addEventListener('click', () => {
+        const total = buildManualHistoryRows(state.lastResult).length;
+        if (total === 0) {
+          showToast('삭제할 수동 매핑 내역이 없습니다.');
+          return;
+        }
+        if (!confirm(`저장된 수동 매핑·확인완료·매칭해제 내역 ${total}건을 모두 삭제하고 원래 상태(확인 큐)로 되돌릴까요?`)) return;
+        pushUndoSnapshot(`수동 매핑 전체 삭제 (${total}건)`);
+        state.config.manual_map = {};
+        state.config.option_manual_map = {};
+        state.config.confirmed_missing_sizes = {};
+        state.config.ignore_products = [];
+        state.config.ignored_options = [];
+        Config.saveConfig(state.config);
+        executeMatching();
+        showToast(`수동 매핑 내역 ${total}건을 모두 삭제했습니다.`, 4500, { allowUndo: true });
+      });
+    }
 
     el.copyDropNosBtn.addEventListener('click', async () => {
       if (!state.lastResult || state.lastResult.dropWarnings.length === 0) return;
@@ -1027,9 +1222,10 @@
       const idx = parseInt(btn.dataset.approveAlias, 10);
       const item = state.lastResult.aliasCandidates[idx];
       if (!item) return;
+      pushUndoSnapshot(`별칭 추가 (${item.from}→${item.to})`);
       state.config.aliases[item.from] = item.to;
       Config.saveConfig(state.config);
-      showToast(`별칭 '${item.from} → ${item.to}' 추가 완료! 재계산합니다.`);
+      showToast(`별칭 '${item.from} → ${item.to}' 추가 완료! 재계산합니다.`, 4000, { allowUndo: true });
       executeMatching();
     });
 
@@ -1038,6 +1234,7 @@
       if (!state.lastResult) return;
       const items = state.lastResult.reviewQueue.filter(it => it.targetType === 'helmet-size');
       if (items.length === 0) return;
+      pushUndoSnapshot(`사이즈 없음 ${items.length}건 일괄 확인`);
       if (!state.config.confirmed_missing_sizes) state.config.confirmed_missing_sizes = {};
       for (const it of items) {
         const prev = new Set(state.config.confirmed_missing_sizes[it.productNo] || []);
@@ -1045,22 +1242,45 @@
         state.config.confirmed_missing_sizes[it.productNo] = Array.from(prev);
       }
       Config.saveConfig(state.config);
-      showToast(`'사이즈 없음' ${items.length}건 0 처리 일괄 확인 완료!`);
+      showToast(`'사이즈 없음' ${items.length}건 0 처리 일괄 확인 완료!`, 4500, { allowUndo: true });
       executeMatching();
     });
 
-    // 테이블 내 상호작용 위임 (추천 후보 클릭, 사이즈없음 확인완료, 직접검색, 제외 토글, 고정재고 토글)
+    // 테이블 내 상호작용 위임 (수동매핑 삭제, 추천 후보 클릭, 사이즈없음 확인완료, 직접검색, 제외 토글, 고정재고 토글)
     document.querySelector('.tabs-card').addEventListener('click', (e) => {
+      const delManualBtn = e.target.closest('[data-delete-manual-type]');
+      if (delManualBtn) {
+        const mType = delManualBtn.dataset.deleteManualType;
+        const mKey = delManualBtn.dataset.deleteManualKey;
+        pushUndoSnapshot(`수동 매핑 삭제 (${mKey})`);
+        if (mType === 'manual_map' && state.config.manual_map) {
+          delete state.config.manual_map[mKey];
+        } else if (mType === 'option_manual_map' && state.config.option_manual_map) {
+          delete state.config.option_manual_map[mKey];
+        } else if (mType === 'confirmed_missing_sizes' && state.config.confirmed_missing_sizes) {
+          delete state.config.confirmed_missing_sizes[mKey];
+        } else if (mType === 'ignore_products') {
+          state.config.ignore_products = (state.config.ignore_products || []).filter(id => String(id) !== String(mKey));
+        } else if (mType === 'ignored_options') {
+          state.config.ignored_options = (state.config.ignored_options || []).filter(k => String(k) !== String(mKey));
+        }
+        Config.saveConfig(state.config);
+        executeMatching();
+        showToast(`매핑 삭제 완료 — 원래 상태(확인 큐)로 되돌렸습니다.`, 4500, { allowUndo: true });
+        return;
+      }
+
       const confirmMissingBtn = e.target.closest('[data-confirm-missing-pno]');
       if (confirmMissingBtn) {
         const pno = confirmMissingBtn.dataset.confirmMissingPno;
         const sizes = (confirmMissingBtn.dataset.confirmMissingSizes || '').split(',').map(s => s.trim()).filter(Boolean);
+        pushUndoSnapshot(`상품 ${pno} 사이즈없음 확인`);
         if (!state.config.confirmed_missing_sizes) state.config.confirmed_missing_sizes = {};
         const prev = new Set(state.config.confirmed_missing_sizes[pno] || []);
         sizes.forEach(s => prev.add(s));
         state.config.confirmed_missing_sizes[pno] = Array.from(prev);
         Config.saveConfig(state.config);
-        showToast(`상품 ${pno} 미존재 사이즈(${sizes.join(', ')}) 0 처리 확인 완료`);
+        showToast(`상품 ${pno} 미존재 사이즈(${sizes.join(', ')}) 0 처리 확인 완료`, 4500, { allowUndo: true });
         executeMatching();
         return;
       }
@@ -1070,18 +1290,19 @@
         const pno = dismissBtn.dataset.dismissQueuePno;
         const targetType = dismissBtn.dataset.dismissQueueType || 'helmet';
         const optVal = dismissBtn.dataset.dismissQueueOpt || '';
+        pushUndoSnapshot(`상품 ${pno} 매칭 해제`);
         if (targetType === 'addon' || targetType === 'shield-option') {
           if (state.config.option_manual_map) delete state.config.option_manual_map[`${pno}::${optVal}`];
           const set = new Set(state.config.ignored_options || []);
           set.add(`${pno}::${optVal}`);
           state.config.ignored_options = Array.from(set);
-          showToast(`상품 ${pno} '${optVal}' 매칭 해제 (기존재고 유지 · 정상처리)`);
+          showToast(`상품 ${pno} '${optVal}' 매칭 해제 (기존재고 유지 · 정상처리)`, 4500, { allowUndo: true });
         } else {
           delete state.config.manual_map[pno];
           const set = new Set((state.config.ignore_products || []).map(String));
           set.add(pno);
           state.config.ignore_products = Array.from(set);
-          showToast(`상품 ${pno} 매칭 해제 (기존재고 유지 · 정상처리)`);
+          showToast(`상품 ${pno} 매칭 해제 (기존재고 유지 · 정상처리)`, 4500, { allowUndo: true });
         }
         Config.saveConfig(state.config);
         executeMatching();
@@ -1096,6 +1317,7 @@
         const optVal = quickBtn.dataset.quickMapOpt || '';
         const isBulk = quickBtn.dataset.quickMapBulk === '1';
         const missingSizes = (quickBtn.dataset.quickMapMissing || '').split(',').map(s => s.trim()).filter(Boolean);
+        pushUndoSnapshot(`매핑 확정 (${baseName})`);
 
         if (targetType === 'addon' || targetType === 'shield-option') {
           if (!state.config.option_manual_map) state.config.option_manual_map = {};
@@ -1106,7 +1328,9 @@
           showToast(
             isBulk
               ? `'${optVal}' 동일 항목 전체 → '${baseName}' 일괄 확정 (정상처리)`
-              : `상품 ${pno} '${optVal}' → '${baseName}' 확정 (정상처리)`
+              : `상품 ${pno} '${optVal}' → '${baseName}' 확정 (정상처리)`,
+            4500,
+            { allowUndo: true }
           );
         } else {
           state.config.manual_map[pno] = [baseName];
@@ -1118,7 +1342,7 @@
             state.config.confirmed_missing_sizes[pno] = Array.from(prev);
           }
           Config.saveConfig(state.config);
-          showToast(`상품 ${pno} → '${baseName}' 확정 완료 (정상처리 · 확인 큐 해소)`);
+          showToast(`상품 ${pno} → '${baseName}' 확정 완료 (정상처리 · 확인 큐 해소)`, 4500, { allowUndo: true });
         }
         executeMatching();
         return;
@@ -1138,13 +1362,14 @@
       const ignBtn = e.target.closest('[data-toggle-ignore]');
       if (ignBtn) {
         const pno = ignBtn.dataset.toggleIgnore;
+        pushUndoSnapshot(`상품 ${pno} 제외 토글`);
         const list = new Set((state.config.ignore_products || []).map(String));
         if (list.has(pno)) {
           list.delete(pno);
-          showToast(`상품 ${pno} 자동갱신 제외 해제`);
+          showToast(`상품 ${pno} 매칭 해제 복원`, 4000, { allowUndo: true });
         } else {
           list.add(pno);
-          showToast(`상품 ${pno} 자동갱신 제외 등록 (기존 재고 유지)`);
+          showToast(`상품 ${pno} 매칭 해제 등록 (기존 재고 유지)`, 4000, { allowUndo: true });
         }
         state.config.ignore_products = Array.from(list);
         Config.saveConfig(state.config);
@@ -1155,12 +1380,13 @@
       const fixBtn = e.target.closest('[data-toggle-fixed]');
       if (fixBtn) {
         const key = fixBtn.dataset.toggleFixed;
+        pushUndoSnapshot(`고정재고 변경 (${key})`);
         if (Object.prototype.hasOwnProperty.call(state.config.fixed_stock, key)) {
           delete state.config.fixed_stock[key];
-          showToast(`고정재고 예외 해제: ${key}`);
+          showToast(`고정재고 예외 해제: ${key}`, 4000, { allowUndo: true });
         } else {
           state.config.fixed_stock[key] = 0;
-          showToast(`고정재고 0 지정: ${key}`);
+          showToast(`고정재고 0 지정: ${key}`, 4000, { allowUndo: true });
         }
         Config.saveConfig(state.config);
         executeMatching();
@@ -1188,6 +1414,7 @@
     el.clearManualMapBtn.addEventListener('click', () => {
       if (!state.pickContext) return;
       const { productNo, optionValue, isOptTarget } = state.pickContext;
+      pushUndoSnapshot(`상품 ${productNo} 수동 매핑 해제`);
       if (isOptTarget) {
         if (state.config.option_manual_map) {
           delete state.config.option_manual_map[`${productNo}::${optionValue}`];
@@ -1206,12 +1433,13 @@
       }
       Config.saveConfig(state.config);
       el.manualPickModal.classList.add('hidden');
-      showToast('수동 매핑 해제 완료 (기존재고 유지 · 정상처리 · 확인 큐에서 제외됨)');
+      showToast('수동 매핑 해제 완료 (기존재고 유지 · 정상처리 · 확인 큐에서 제외됨)', 4500, { allowUndo: true });
       executeMatching();
     });
     el.confirmManualPickBtn.addEventListener('click', () => {
       if (!state.pickContext) return;
       const { productNo, optionValue, isOptTarget } = state.pickContext;
+      pushUndoSnapshot(`상품 ${productNo} 직접 검색 매핑 저장`);
       if (isOptTarget) {
         if (!state.config.option_manual_map) state.config.option_manual_map = {};
         const key = el.pickBulkCheck.checked
@@ -1239,7 +1467,11 @@
       }
       Config.saveConfig(state.config);
       el.manualPickModal.classList.add('hidden');
-      showToast(state.pickSelected.length === 0 ? '매핑 해제 완료 (기존재고 유지 · 정상처리)' : '수동 매핑 확정 완료 (정상처리 · 즉시 재계산)');
+      showToast(
+        state.pickSelected.length === 0 ? '매핑 해제 완료 (기존재고 유지 · 정상처리)' : '수동 매핑 확정 완료 (정상처리 · 즉시 재계산)',
+        4500,
+        { allowUndo: true }
+      );
       executeMatching();
     });
 
