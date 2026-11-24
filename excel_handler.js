@@ -1482,17 +1482,90 @@
     return prefix + body.slice(0, insertPos) + replacementCell + body.slice(insertPos) + suffix;
   }
 
-  /**
-   * 10. 쿠팡 Wing 업로드용 엑셀 OOXML 무손상 패치 (S열 잔여수량만 입력, R열 미변경)
-   */
-  async function patchCoupangExcel(originalBuffer, rowUpdates, options = {}, deps = {}) {
-    const JSZipLib = getJSZip(deps.JSZip);
-    const zip = await JSZipLib.loadAsync(originalBuffer);
-    const sheetInfo = await resolveSheetPath(zip, 'data');
-    let sheetXml = await zip.file(sheetInfo.sheetPath).async('string');
+  // 쿠팡 양식(A~S, 1~19열) 초과 셀(T·U열 등) 제거 및 행 spans 보정
+  function normalizeCoupangRowColumns(rowXml, maxCol = 19) {
+    let out = rowXml.replace(/\bspans="(\d+):(\d+)"/i, (m, s, e) => {
+      const endNum = parseInt(e, 10);
+      return endNum > maxCol ? `spans="${s}:${maxCol}"` : m;
+    });
+    if (/\/>$/.test(out)) return out;
 
+    const openEnd = out.indexOf('>') + 1;
+    const closeStart = out.lastIndexOf('</row>');
+    if (openEnd <= 0 || closeStart < openEnd) return out;
+
+    const prefix = out.slice(0, openEnd);
+    const body = out.slice(openEnd, closeStart);
+    const suffix = out.slice(closeStart);
+
+    const cleanedBody = body.replace(/<c\b([^>]*?)(?:\/>|>[\s\S]*?<\/c>)/g, (cellFull, attrs) => {
+      const ref = getAttr('<c ' + attrs + '>', 'r');
+      const m = ref && ref.match(/^([A-Z]+)\d+$/i);
+      if (m && colLettersToNum(m[1]) > maxCol) {
+        return '';
+      }
+      return cellFull;
+    });
+
+    return prefix + cleanedBody + suffix;
+  }
+
+  // 데이터 행에 누락된 빈 셀(예: P열) 보완 (이미 존재하면 절대 건드리지 않음)
+  function ensureEmptyCellInRowXml(rowXml, rowNum, colNum) {
+    if (/\/>$/.test(rowXml)) return rowXml;
+    const colLetters = numToColLetters(colNum);
+    const cellRef = `${colLetters}${rowNum}`;
+    const existsRe = new RegExp(`<c\\b[^>]*?\\br="${cellRef}"`, 'i');
+    if (existsRe.test(rowXml)) return rowXml;
+
+    const openEnd = rowXml.indexOf('>') + 1;
+    const closeStart = rowXml.lastIndexOf('</row>');
+    if (openEnd <= 0 || closeStart < openEnd) return rowXml;
+
+    const prefix = rowXml.slice(0, openEnd);
+    const body = rowXml.slice(openEnd, closeStart);
+    const suffix = rowXml.slice(closeStart);
+
+    // 인접 셀(Q, O, S 순) 스타일 재사용
+    let styleAttr = '';
+    for (const refCol of [colNum + 1, colNum - 1, 19]) {
+      const refId = `${numToColLetters(refCol)}${rowNum}`;
+      const m = body.match(new RegExp(`<c\\b([^>]*?\\br="${refId}"[^>]*?)(?:\\/>|>)`, 'i'));
+      if (m) {
+        const sVal = getAttr('<c ' + m[1] + '>', 's');
+        if (sVal !== null) {
+          styleAttr = ` s="${escapeXml(sVal)}"`;
+          break;
+        }
+      }
+    }
+
+    const emptyCell = `<c r="${cellRef}"${styleAttr}/>`;
+    const cRe = /<c\b([^>]*?)(?:\/>|>[\s\S]*?<\/c>)/g;
+    let cm;
+    let insertPos = body.length;
+    while ((cm = cRe.exec(body)) !== null) {
+      const ref = getAttr('<c ' + cm[1] + '>', 'r');
+      const m = ref && ref.match(/^([A-Z]+)\d+$/i);
+      if (m && colLettersToNum(m[1]) > colNum) {
+        insertPos = cm.index;
+        break;
+      }
+    }
+
+    return prefix + body.slice(0, insertPos) + emptyCell + body.slice(insertPos) + suffix;
+  }
+
+  /**
+   * 쿠팡 data 시트 XML 정밀 패치 (순수 XML 변환 함수)
+   * - S열(19열) 잔여수량만 입력, R열(판매상태) 미변경
+   * - 원본 템플릿에 밀려 들어간 T·U열(20·21열) 등 19열 초과 빈 셀 자동 제거
+   * - dimension(A1:S...) 및 spans(1:19)를 A~S열(19열)로 보정, 누락된 P열 빈 셀 보완
+   */
+  function patchCoupangSheetXml(sheetXml, rowUpdates, options = {}) {
+    const MAX_COUPANG_COL = 19; // S열
     const onlyChanged = options.onlyChanged !== false;
-    const updateByRow = new Map(rowUpdates.map(u => [u.rowIndex, u]));
+    const updateByRow = new Map((rowUpdates || []).map(u => [u.rowIndex, u]));
     const filterRowSet = options.filterRowIndices instanceof Set && options.filterRowIndices.size > 0
       ? options.filterRowIndices
       : null;
@@ -1502,15 +1575,21 @@
     let writtenCount = 0;
     let nextRowNum = 4;
 
-    sheetXml = sheetXml.replace(/<row\b([^>]*?)(?:\/>|>([\s\S]*?)<\/row>)/g, (fullMatch, rowAttrs) => {
+    let patchedXml = sheetXml.replace(/<row\b([^>]*?)(?:\/>|>([\s\S]*?)<\/row>)/g, (fullMatch, rowAttrs) => {
       const rAttr = getAttr('<row ' + rowAttrs + '>', 'r');
       const rowNum = parseInt(rAttr || '0', 10);
-      if (!rowNum || rowNum < 4) return fullMatch;
+      if (!rowNum) return fullMatch;
+
+      // 1~3행 헤더 포함 모든 행에서 S열(19열) 초과 셀 제거 및 spans="1:19" 보정
+      let patched = normalizeCoupangRowColumns(fullMatch, MAX_COUPANG_COL);
+      if (rowNum < 4) return patched;
 
       if (filterRowSet && !filterRowSet.has(rowNum)) return '';
 
+      // 원본 템플릿에서 누락된 P열(16열) 빈 셀 보완 (값이 이미 있으면 유지)
+      patched = ensureEmptyCellInRowXml(patched, rowNum, 16);
+
       const upd = updateByRow.get(rowNum);
-      let patched = fullMatch;
       if (upd) {
         const shouldWrite = Boolean(upd.canWriteS) && (!onlyChanged || upd.newStock !== upd.oldStock);
         if (shouldWrite) {
@@ -1530,15 +1609,36 @@
       return patched;
     });
 
-    if (isFiltering) {
-      const lastRow = Math.max(3, 3 + keptDataRowCount);
-      sheetXml = sheetXml.replace(
-        /(<dimension\b[^>]*?\bref="[A-Z]+\d+:[A-Z]+)\d+(")/i,
-        `$1${lastRow}$2`
-      );
-    }
+    // <dimension ref="A1:U410"/> → <dimension ref="A1:S410"/> (분할 시 끝행도 동기화)
+    patchedXml = patchedXml.replace(
+      /(<dimension\b[^>]*?\bref=")([A-Z]+)(\d+):([A-Z]+)(\d+)(")/i,
+      (m, pre, startCol, startRow, endCol, endRow, post) => {
+        const clampedCol = colLettersToNum(endCol) > MAX_COUPANG_COL
+          ? numToColLetters(MAX_COUPANG_COL)
+          : endCol;
+        const finalRow = isFiltering ? Math.max(3, 3 + keptDataRowCount) : endRow;
+        return `${pre}${startCol}${startRow}:${clampedCol}${finalRow}${post}`;
+      }
+    );
 
-    zip.file(sheetInfo.sheetPath, sheetXml);
+    return {
+      sheetXml: patchedXml,
+      filteredCount: isFiltering ? keptDataRowCount : (rowUpdates || []).length,
+      writtenCount
+    };
+  }
+
+  /**
+   * 10. 쿠팡 Wing 업로드용 엑셀 OOXML 무손상 패치 (S열 잔여수량만 입력, R열 미변경, T·U 초과열 정리)
+   */
+  async function patchCoupangExcel(originalBuffer, rowUpdates, options = {}, deps = {}) {
+    const JSZipLib = getJSZip(deps.JSZip);
+    const zip = await JSZipLib.loadAsync(originalBuffer);
+    const sheetInfo = await resolveSheetPath(zip, 'data');
+    const rawSheetXml = await zip.file(sheetInfo.sheetPath).async('string');
+
+    const patchedRes = patchCoupangSheetXml(rawSheetXml, rowUpdates, options);
+    zip.file(sheetInfo.sheetPath, patchedRes.sheetXml);
 
     const outType = options.outputType || 'uint8array';
     const output = await zip.generateAsync({
@@ -1549,8 +1649,8 @@
 
     return {
       data: output,
-      filteredCount: isFiltering ? keptDataRowCount : rowUpdates.length,
-      writtenCount
+      filteredCount: patchedRes.filteredCount,
+      writtenCount: patchedRes.writtenCount
     };
   }
 
@@ -1643,6 +1743,7 @@
     parseCafe24Csv,
     buildCafe24UploadPackage,
     parseCoupangExcel,
+    patchCoupangSheetXml,
     patchCoupangExcel,
     sanitizeCoupangFileName,
     buildCoupangUploadPackage,
