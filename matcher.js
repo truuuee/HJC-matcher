@@ -207,13 +207,18 @@
   }
 
   function keywordScore(base, name, config) {
-    if (!base.words || base.words.length === 0) return 0.0;
     const c = cn(name, config);
-    let hits = 0;
-    for (const w of base.words) {
-      if (c.includes(w)) hits++;
-    }
-    return hits / base.words.length;
+    const calc = (words) => {
+      if (!words || words.length === 0) return 0.0;
+      let hits = 0;
+      for (const w of words) {
+        if (c.includes(w)) hits++;
+      }
+      return hits / words.length;
+    };
+    const engScore = calc(base.words);
+    const koScore = calc(base.koWords);
+    return Math.max(engScore, koScore);
   }
 
   // Python difflib.SequenceMatcher.ratio() 근사 구현 (LCS 기반 유사도)
@@ -288,14 +293,23 @@
       const model = modelOf(baseName, models);
       if (!model) continue;
 
+      const rawDisplay = String(it.display_name || '').trim();
+      const displayBaseName = rawDisplay
+        ? rawDisplay.replace(END_SIZE_RE, '').trim()
+        : baseName;
+
       if (!baseMap.has(baseName)) {
         const mc = mcOf(baseName);
         const fl = flagsOf(baseName, config);
         const solid = compact(baseName, config).includes('솔리드') && !mc;
         const color = solid ? colorOf(baseName, config) : null;
         const words = extractWords(baseName, model, models);
+        const koWords = displayBaseName !== baseName
+          ? extractWords(displayBaseName, model, models)
+          : [];
         baseMap.set(baseName, {
           name: baseName,
+          displayName: displayBaseName,
           model,
           v2: fl.v2,
           carb: fl.carb,
@@ -303,6 +317,8 @@
           solid,
           color,
           words,
+          koWords,
+          aliases: new Set(),
           sizes: {},
           codes: new Set(),
           barcodes: new Set()
@@ -310,6 +326,16 @@
       }
 
       const rec = baseMap.get(baseName);
+      if (displayBaseName && displayBaseName !== baseName && rec.displayName === baseName) {
+        rec.displayName = displayBaseName;
+        rec.koWords = extractWords(displayBaseName, model, models);
+      }
+      if (Array.isArray(it.aliases)) {
+        for (const a of it.aliases) {
+          const s = String(a || '').trim();
+          if (s) rec.aliases.add(s);
+        }
+      }
       if (!rec.sizes[size]) rec.sizes[size] = [0, false];
       rec.sizes[size][0] += st;
       rec.sizes[size][1] = rec.sizes[size][1] || hq;
@@ -317,7 +343,10 @@
       if (bcode) rec.barcodes.add(bcode);
     }
 
-    const bases = Array.from(baseMap.values());
+    const bases = Array.from(baseMap.values()).map(b => {
+      b.aliases = Array.from(b.aliases);
+      return b;
+    });
     const basesByModel = new Map();
     for (const b of bases) {
       if (!basesByModel.has(b.model)) basesByModel.set(b.model, []);
@@ -359,6 +388,7 @@
     }
     return {
       name: b.name,
+      displayName: b.displayName || b.name,
       totalStore,
       hqAny: hqCount > 0,
       hqCount,
@@ -400,22 +430,27 @@
       const kw = keywordScore(b, productName, config);
       pts += Math.round(40 * kw);
 
-      // 키워드 유사 일치 (difflib >= 0.8)
-      if (b.words.length > 0 && nameWords.length > 0) {
-        let bestSimSum = 0;
-        for (const bw of b.words) {
-          let bestSim = 0;
-          if (cName.includes(bw)) {
-            bestSim = 1.0;
-          } else {
-            for (const nw of nameWords) {
-              const r = similarityRatio(bw, nw);
-              if (r > bestSim) bestSim = r;
+      // 키워드 유사 일치 (difflib >= 0.8, 영문 words 및 국문 koWords 중 높은 점수 채택)
+      if (nameWords.length > 0 && (b.words.length > 0 || (b.koWords && b.koWords.length > 0))) {
+        const calcSimRatio = (wordList) => {
+          if (!wordList || wordList.length === 0) return 0;
+          let sum = 0;
+          for (const bw of wordList) {
+            let bestSim = 0;
+            if (cName.includes(bw)) {
+              bestSim = 1.0;
+            } else {
+              for (const nw of nameWords) {
+                const r = similarityRatio(bw, nw);
+                if (r > bestSim) bestSim = r;
+              }
             }
+            if (bestSim >= 0.8 && bestSim < 1.0) sum += bestSim;
           }
-          if (bestSim >= 0.8 && bestSim < 1.0) bestSimSum += bestSim;
-        }
-        pts += Math.round(20 * (bestSimSum / b.words.length));
+          return sum / wordList.length;
+        };
+        const simRatio = Math.max(calcSimRatio(b.words), calcSimRatio(b.koWords));
+        pts += Math.round(20 * simRatio);
       }
 
       // 별칭 사전 적중 가산점

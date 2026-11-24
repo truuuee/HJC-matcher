@@ -820,8 +820,8 @@
               data-quick-map-opt="${esc(item.optionValue)}"
               data-quick-map-confirm-key="${esc(confirmKey)}"
               data-quick-map-missing="${esc(missingCsv)}"
-              title="클릭하여 이 항목을 '${esc(c.name)}'으로 확정">
-              <span>${esc(c.name)}</span>
+              title="클릭하여 이 항목을 '${esc(c.displayName || c.name)}'으로 확정">
+              <span>${esc(c.displayName || c.name)}</span>
               <span class="cand-meta">점수 ${c.score} · 매장 ${c.totalStore} · 본사 ${c.hqAny ? 'O' : 'X'}</span>
             </button>
             ${isOptTarget && dupCnt >= 2 ? `
@@ -1184,50 +1184,99 @@
     el.pickSearchInput.focus();
   }
 
+  function getInventoryDisplayLabel(name, index) {
+    if (!name || !index) return name || '';
+    const base = index.baseMap && index.baseMap.get(name);
+    if (base && base.displayName) return base.displayName;
+    const found = (index.items || []).find(it => it.product_name === name);
+    if (found && found.display_name) return found.display_name;
+    return name;
+  }
+
+  function buildPickSearchTokens(token) {
+    const out = [token];
+    const noSpace = token.replace(/\s+/g, '');
+    if (noSpace && noSpace !== token) out.push(noSpace);
+    if (token.includes('알파')) {
+      out.push(token.replace(/알파/g, 'rpha'));
+      out.push(token.replace(/알파(\d+)/g, 'rpha $1'));
+    }
+    if (token.includes('rpha')) {
+      out.push(token.replace(/rpha/g, '알파'));
+      out.push(token.replace(/rpha\s*(\d+)/g, '알파$1'));
+    }
+    return Array.from(new Set(out.filter(Boolean)));
+  }
+
   function renderPickModalLists() {
     const sess = curSession();
     if (!sess.lastResult) return;
+    const index = sess.lastResult.index;
+
     el.pickSelectedChips.innerHTML = state.pickSelected.length === 0
       ? '<span class="sub-text">선택된 재고 없음</span>'
-      : state.pickSelected.map((name, i) => `
-          <span class="sel-chip">
-            ${esc(name)}
-            <button data-remove-pick="${i}" title="제거">&times;</button>
-          </span>
-        `).join('');
+      : state.pickSelected.map((name, i) => {
+          const label = getInventoryDisplayLabel(name, index);
+          return `
+            <span class="sel-chip" title="${esc(name)}">
+              ${esc(label)}
+              <button data-remove-pick="${i}" title="제거">&times;</button>
+            </span>
+          `;
+        }).join('');
 
     const q = el.pickSearchInput.value.trim().toLowerCase();
     const tokens = q.split(/\s+/).filter(Boolean);
     const mode = el.pickTypeFilter.value;
-    const index = sess.lastResult.index;
 
     let pool = [];
     if (mode === 'helmet') {
       pool = index.bases.map(b => {
         const stSum = Object.values(b.sizes).reduce((a, [st]) => a + st, 0);
         const hqAny = Object.values(b.sizes).some(([, hq]) => hq);
-        return { name: b.name, meta: `사이즈 ${Object.keys(b.sizes).length}종 · 매장합 ${stSum} · 본사 ${hqAny ? 'O' : 'X'}` };
+        const displayName = b.displayName || b.name;
+        const hay = [b.name, displayName, ...(b.aliases || [])].filter(Boolean).join(' ').toLowerCase();
+        return {
+          name: b.name,
+          displayName,
+          hay,
+          hayNoSpace: hay.replace(/\s+/g, ''),
+          meta: `사이즈 ${Object.keys(b.sizes).length}종 · 매장합 ${stSum} · 본사 ${hqAny ? 'O' : 'X'}`
+        };
       });
     } else {
-      pool = index.items.map(it => ({
-        name: it.product_name,
-        meta: `코드 ${it.product_code || '-'} · 매장 ${it.store_stock} · 본사 ${it.hq_stock}`
-      }));
+      pool = index.items.map(it => {
+        const displayName = it.display_name || it.product_name;
+        const hay = [it.product_name, displayName, it.product_code, it.barcode, ...(it.aliases || [])]
+          .filter(Boolean).join(' ').toLowerCase();
+        return {
+          name: it.product_name,
+          displayName,
+          hay,
+          hayNoSpace: hay.replace(/\s+/g, ''),
+          meta: `코드 ${it.product_code || '-'} · 매장 ${it.store_stock} · 본사 ${it.hq_stock}`
+        };
+      });
     }
 
     const filtered = pool.filter(item => {
       if (tokens.length === 0) return true;
-      const hay = item.name.toLowerCase();
-      return tokens.every(t => hay.includes(t));
+      return tokens.every(t => {
+        const variants = buildPickSearchTokens(t);
+        return variants.some(v => item.hay.includes(v) || item.hayNoSpace.includes(v.replace(/\s+/g, '')));
+      });
     }).slice(0, 80);
 
     el.pickResultList.innerHTML = filtered.length === 0
       ? '<div class="empty-row">검색 결과가 없습니다.</div>'
       : filtered.map(item => {
           const isSel = state.pickSelected.includes(item.name);
+          const subOrig = item.displayName !== item.name
+            ? ` <small class="sub-text">(${esc(item.name)})</small>`
+            : '';
           return `
             <div class="pick-item ${isSel ? 'selected' : ''}" data-toggle-pick-item="${esc(item.name)}">
-              <span>${isSel ? '✅ ' : ''}${esc(item.name)}</span>
+              <span>${isSel ? '✅ ' : ''}${esc(item.displayName)}${subOrig}</span>
               <span class="cand-meta">${esc(item.meta)}</span>
             </div>
           `;
