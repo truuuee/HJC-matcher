@@ -1554,12 +1554,19 @@
     };
   }
 
+  // 쿠팡 Wing 업로드용 파일명 정제 (영문과 숫자만 허용, 한글/특수문자 제거)
+  function sanitizeCoupangFileName(name, fallback = 'coupangStock') {
+    const cleaned = String(name || '').replace(/[^A-Za-z0-9]/g, '');
+    return cleaned || fallback;
+  }
+
   /**
    * 11. 쿠팡 업로드 패키지 생성 (1,500옵션 초과 시 1,500행 단위 분할 ZIP)
+   * - 쿠팡 Wing 업로드 정책상 파일명은 영문·숫자([A-Za-z0-9])만 사용
    */
   async function buildCoupangUploadPackage(originalBuffer, rowUpdates, options = {}, deps = {}) {
     const chunkSize = Math.max(1, parseInt(options.chunkSize || 1500, 10));
-    const baseFileName = options.baseFileName || '쿠팡_재고수정용';
+    const baseFileName = sanitizeCoupangFileName(options.baseFileName, 'coupangStock');
     const onlyChanged = options.onlyChanged !== false;
 
     if (rowUpdates.length <= chunkSize) {
@@ -1591,9 +1598,7 @@
     for (let p = 0; p < partCount; p++) {
       const start = p * chunkSize;
       const slice = rowUpdates.slice(start, start + chunkSize);
-      const startNum = start + 1;
-      const endNum = start + slice.length;
-      const partName = `${baseFileName}_${p + 1}of${partCount}_${startNum}-${endNum}.xlsx`;
+      const partName = `${baseFileName}Part${p + 1}of${partCount}.xlsx`;
 
       const patched = await patchCoupangExcel(
         originalBuffer,
@@ -1639,6 +1644,7 @@
     buildCafe24UploadPackage,
     parseCoupangExcel,
     patchCoupangExcel,
+    sanitizeCoupangFileName,
     buildCoupangUploadPackage,
     generateReviewWorkbook,
     parseErrorExcel,

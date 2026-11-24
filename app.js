@@ -1549,7 +1549,7 @@
             {
               chunkSize: 1500,
               onlyChanged: sess.coupangOnlyChanged,
-              baseFileName: `쿠팡_재고수정용_${todayYYYYMMDD()}`
+              baseFileName: `coupangStock${todayYYYYMMDD()}`
             }
           );
           triggerDownload(pkg.data, pkg.fileName, pkg.mimeType);
