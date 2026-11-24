@@ -4,13 +4,13 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>HJC 스마트스토어 재고 매칭 · 일괄수정 시스템</title>
+  <title>HJC 멀티채널 재고 매칭 · 일괄수정 시스템 v3.0</title>
   <link rel="preconnect" href="https://fonts.googleapis.com">
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link
     href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=Noto+Sans+KR:wght@300;400;500;600;700;800&display=swap"
     rel="stylesheet">
-  <link rel="stylesheet" href="style.css?v=3">
+  <link rel="stylesheet" href="style.css?v=3.0">
 </head>
 
 <body class="theme-dark">
@@ -19,17 +19,17 @@
     <header class="app-header">
       <div class="header-main">
         <div class="brand-section">
-          <div class="brand-badge">HJC SMARTSTORE</div>
+          <div class="brand-badge" id="brandBadge">HJC MULTI-CHANNEL</div>
           <div>
-            <h1 class="app-title">스마트스토어 재고 매칭 · 일괄수정 프로그램</h1>
-            <p class="app-subtitle">브라우저 내 100% 로컬 처리 · 담당별 스토어 매핑 자동 저장</p>
+            <h1 class="app-title">멀티채널 재고 매칭 · 일괄수정 프로그램 <span class="version-badge" id="appVersionBadge">v3.0</span></h1>
+            <p class="app-subtitle">카페24 · 네이버 스마트스토어 · 쿠팡 통합 지원 · 브라우저 내 100% 로컬 처리</p>
           </div>
         </div>
         <div class="header-actions">
-          <button id="openSettingsBtn" class="btn btn-secondary" title="매칭 규칙 및 수동 매핑 설정">
+          <button id="openSettingsBtn" class="btn btn-secondary" title="공통 규칙 및 채널별 수동 매핑 설정">
             ⚙️ 설정 · 매핑 관리
           </button>
-          <button id="exportConfigQuickBtn" class="btn btn-ghost" title="내 스토어 매핑 설정을 JSON 파일로 백업">
+          <button id="exportConfigQuickBtn" class="btn btn-ghost" title="전체 채널 매핑 설정을 JSON 파일로 백업">
             💾 설정 백업
           </button>
           <button id="themeToggleBtn" class="btn-icon" title="다크/라이트 테마 전환" aria-label="테마 전환">
@@ -38,7 +38,7 @@
         </div>
       </div>
 
-      <!-- 1단계: HJC 통합 재고 데이터 연동 배너 -->
+      <!-- 1단계: HJC 통합 재고 데이터 연동 배너 (3개 채널 공통) -->
       <section class="inventory-bar">
         <div class="inventory-status-group">
           <div class="sync-pill">
@@ -56,15 +56,45 @@
       </section>
     </header>
 
-    <!-- 2단계: 스마트스토어 엑셀 업로드 및 실행 -->
+    <!-- 메인 채널 선택 탭 (순서: 카페24 | 네이버 스마트스토어 | 쿠팡) -->
+    <nav class="channel-nav" role="tablist" aria-label="판매 채널 선택">
+      <button type="button" class="channel-tab-btn active" data-channel="cafe24" role="tab" aria-selected="true">
+        <div class="channel-tab-top">
+          <span class="channel-dot dot-cafe24"></span>
+          <strong class="channel-tab-name">카페24</strong>
+          <span class="channel-tab-pill" id="chStatus-cafe24">대기</span>
+        </div>
+        <span class="channel-tab-sub">자사몰 재고 CSV · 품절표시 'T' 고정 · 1,000행 분할</span>
+      </button>
+
+      <button type="button" class="channel-tab-btn" data-channel="smartstore" role="tab" aria-selected="false">
+        <div class="channel-tab-top">
+          <span class="channel-dot dot-smartstore"></span>
+          <strong class="channel-tab-name">네이버 스마트스토어</strong>
+          <span class="channel-tab-pill" id="chStatus-smartstore">대기</span>
+        </div>
+        <span class="channel-tab-sub">일괄수정 XLSX · 옵션/추가상품 · 500개 분할</span>
+      </button>
+
+      <button type="button" class="channel-tab-btn" data-channel="coupang" role="tab" aria-selected="false">
+        <div class="channel-tab-top">
+          <span class="channel-dot dot-coupang"></span>
+          <strong class="channel-tab-name">쿠팡</strong>
+          <span class="channel-tab-pill" id="chStatus-coupang">대기</span>
+        </div>
+        <span class="channel-tab-sub">가격/재고 XLSX · S열 패치 · 1,500옵션 분할</span>
+      </button>
+    </nav>
+
+    <!-- 2단계: 채널별 파일 업로드 및 실행 -->
     <section class="upload-section card">
       <div class="upload-top-row">
         <div id="excelDropZone" class="drop-zone" tabindex="0">
-          <input type="file" id="excelFileInput" accept=".xlsx" hidden>
-          <div class="drop-icon">📊</div>
+          <input type="file" id="excelFileInput" accept=".csv" hidden>
+          <div class="drop-icon" id="dropIcon">📄</div>
           <div class="drop-text">
-            <strong id="excelFileName">스마트스토어 일괄수정 엑셀(.xlsx)을 여기에 끌어다 놓거나 클릭하세요</strong>
-            <span id="excelFileSub">스마트스토어센터 &gt; 상품 일괄수정에서 내려받은 파일 (시트명: 일괄수정)</span>
+            <strong id="excelFileName">카페24 재고관리 CSV 파일(.csv)을 여기에 끌어다 놓거나 클릭하세요</strong>
+            <span id="excelFileSub">카페24 관리자 &gt; 상품관리 &gt; 재고관리에서 내려받은 CSV 파일 (bmotomall_*.csv)</span>
           </div>
           <button type="button" id="clearExcelBtn" class="drop-clear-btn hidden" title="업로드된 파일 삭제"
             aria-label="업로드된 파일 삭제">✕</button>
@@ -75,7 +105,22 @@
         </button>
       </div>
 
-      <details class="aux-tools">
+      <!-- 카페24 전용 규칙 안내 바 -->
+      <div id="auxCafe24Bar" class="channel-aux-bar">
+        <span>📌 <strong>카페24 자동 규칙</strong>: 모든 품목의 <code>품절표시 사용</code> 컬럼을 무조건 <code>'T'</code>로 지정 · 동일 상품코드 <code>총 재고량</code> 자동 합산 · 1,000행 초과 시 1,000행 단위 분할 ZIP 생성</span>
+      </div>
+
+      <!-- 쿠팡 전용 옵션 바 -->
+      <div id="auxCoupangBar" class="channel-aux-bar hidden">
+        <label class="checkbox-label">
+          <input type="checkbox" id="coupangOnlyChangedCheck" checked>
+          <span><strong>S열(잔여수량) 재고 변경 행만 입력</strong> (해제 시 매칭 확정 전체 행 입력 · R열 판매상태는 미변경)</span>
+        </label>
+        <span class="aux-hint">업체 등록 상품명(H열) 우선 매칭 · 노출상품명(G열) 상이 자동 감지 · 1,500옵션 초과 시 분할 ZIP</span>
+      </div>
+
+      <!-- 스마트스토어 전용 보조 도구 -->
+      <details id="auxSmartstoreDetails" class="aux-tools hidden">
         <summary>🛠️ 보조 도구: 오늘출발 가능수량 보정 / 업로드 실패 엑셀 재추출</summary>
         <div class="aux-tools-body">
           <div class="aux-item">
@@ -122,15 +167,15 @@
       <!-- 다운로드 액션 바 -->
       <div class="download-bar card">
         <div class="download-summary">
-          <div class="download-title">✅ 매칭 완료 — 원본 서식 유지 업로드 파일 &amp; 검토표 준비됨</div>
+          <div class="download-title" id="downloadTitle">✅ 매칭 완료 — 업로드용 파일 &amp; 검토표 준비됨</div>
           <div class="download-meta" id="resultMetaSummary">-</div>
         </div>
         <div class="download-buttons">
           <button id="downloadUploadExcelBtn" class="btn btn-success btn-lg">
-            ⬇️ 재고수정용 엑셀 다운로드 (업로드용)
+            ⬇️ 재고수정용 파일 다운로드 (업로드용)
           </button>
           <button id="downloadReviewExcelBtn" class="btn btn-primary btn-lg">
-            📑 검토표 엑셀 다운로드 (5개 시트)
+            📑 검토표 엑셀 다운로드
           </button>
         </div>
       </div>
@@ -140,7 +185,7 @@
         <div class="kpi-card">
           <span class="kpi-label">전체 상품 / 옵션</span>
           <div class="kpi-value" id="kpiTotalProducts">0 / 0</div>
-          <span class="kpi-sub" id="kpiAddonsSub">추가상품 0개 상품 (0항목)</span>
+          <span class="kpi-sub" id="kpiAddonsSub">-</span>
         </div>
         <div class="kpi-card kpi-ok">
           <span class="kpi-label">정상 매칭</span>
@@ -155,7 +200,7 @@
         <div class="kpi-card kpi-check">
           <span class="kpi-label">확인필요 (추정/부분실패)</span>
           <div class="kpi-value" id="kpiCheckCount">0</div>
-          <span class="kpi-sub">추정 매칭·추가상품 확인</span>
+          <span class="kpi-sub">추정 매칭·부분 미매칭 확인</span>
         </div>
         <div class="kpi-card kpi-fail">
           <span class="kpi-label">미반영 (매칭실패)</span>
@@ -163,7 +208,7 @@
           <span class="kpi-sub">기존 재고 유지됨</span>
         </div>
         <div class="kpi-card kpi-stock">
-          <span class="kpi-label">총 옵션 재고 합계 (M열)</span>
+          <span class="kpi-label" id="kpiStockLabel">총 옵션 재고 합계</span>
           <div class="kpi-value" id="kpiStockChange">0 → 0</div>
           <span class="kpi-sub" id="kpiStockDiff">증감 0</span>
         </div>
@@ -173,7 +218,7 @@
       <div id="aliasLearnBar" class="alias-learn-bar card hidden">
         <div class="alias-learn-header">
           <strong>💡 별칭 자동 학습 후보 발견 (§12.6)</strong>
-          <span>MC코드 확정 매칭 중 발견된 표기 차이입니다. 승인하면 다음 실행부터 키워드 점수에 자동 반영됩니다.</span>
+          <span>MC코드 확정 매칭 중 발견된 표기 차이입니다. 승인하면 3개 채널 공통 별칭 사전에 자동 반영됩니다.</span>
         </div>
         <div id="aliasLearnList" class="alias-chip-list"></div>
       </div>
@@ -191,11 +236,14 @@
             <button class="tab-btn" data-tab="options">
               🧩 옵션별 상세 <span class="tab-badge" id="badgeOptions">0</span>
             </button>
-            <button class="tab-btn" data-tab="addons">
+            <button class="tab-btn hidden" data-tab="addons" id="tabBtnAddons">
               ➕ 추가상품 상세 <span class="tab-badge" id="badgeAddons">0</span>
             </button>
+            <button class="tab-btn hidden" data-tab="displaydiff" id="tabBtnDisplayDiff">
+              👁️ 노출상품명 상이 <span class="tab-badge badge-warn" id="badgeDisplayDiff">0</span>
+            </button>
             <button class="tab-btn" data-tab="drops">
-              ⚠️ 오늘출발 주의 <span class="tab-badge badge-danger" id="badgeDrops">0</span>
+              <span id="tabBtnDropsLabel">⚠️ 재고 대폭감소</span> <span class="tab-badge badge-danger" id="badgeDrops">0</span>
             </button>
             <button class="tab-btn" data-tab="manual">
               📝 수동 매핑 내역 <span class="tab-badge badge-info" id="badgeManual">0</span>
@@ -203,7 +251,7 @@
           </div>
 
           <div class="tab-filters">
-            <input type="text" id="tableSearchInput" class="text-input input-sm" placeholder="상품번호·상품명·옵션 검색...">
+            <input type="text" id="tableSearchInput" class="text-input input-sm" placeholder="코드·상품명·옵션 검색...">
             <select id="statusFilterSelect" class="select-input input-sm">
               <option value="all">전체 상태</option>
               <option value="정상">정상</option>
@@ -219,8 +267,7 @@
         <div id="tab-queue" class="tab-pane active">
           <div class="pane-notice">
             <div>
-              미매칭·추정 매칭·사이즈 없음 항목을 모았습니다. 추천 후보를 클릭하거나 <strong>직접 검색</strong>으로 확정하면 내 스토어 매핑(<code>manual_map</code> /
-              <code>option_manual_map</code>)에 저장되고 즉시 재계산됩니다.
+              미매칭·추정 매칭·사이즈 없음 항목을 모았습니다. 추천 후보를 클릭하거나 <strong>직접 검색</strong>으로 확정하면 현재 채널의 독립 매핑에 저장되고 즉시 재계산됩니다.
             </div>
             <div class="pane-actions">
               <button id="undoActionBtn" class="btn btn-secondary btn-sm hidden" title="직전 매핑/해제 작업을 이전 상태로 되돌립니다">↩️ 방금 작업 되돌리기</button>
@@ -232,9 +279,9 @@
               <thead>
                 <tr>
                   <th style="width:120px">구분</th>
-                  <th style="width:125px">상품번호</th>
+                  <th style="width:130px" class="col-id-label">상품코드</th>
                   <th>상품명 / 대상</th>
-                  <th style="width:200px">사유 / 기본 처리</th>
+                  <th style="width:210px">사유 / 기본 처리</th>
                   <th style="width:390px">추천 후보 (클릭 시 확정) · 직접 지정</th>
                 </tr>
               </thead>
@@ -249,13 +296,13 @@
             <table class="data-table">
               <thead>
                 <tr>
-                  <th style="width:125px">상품번호</th>
+                  <th style="width:130px" class="col-id-label">상품코드</th>
                   <th>상품명</th>
                   <th style="width:90px" class="num">기존</th>
                   <th style="width:90px" class="num">변경</th>
                   <th style="width:90px" class="num">증감</th>
                   <th style="width:95px">상태</th>
-                  <th style="width:170px">이슈 (실패/추정/사이즈/추가)</th>
+                  <th style="width:170px">이슈 (실패/추정/사이즈)</th>
                   <th style="width:220px">매칭 재고 품목</th>
                   <th style="width:140px">작업</th>
                 </tr>
@@ -271,14 +318,14 @@
             <table class="data-table">
               <thead>
                 <tr>
-                  <th style="width:125px">상품번호</th>
+                  <th style="width:130px" class="col-id-label">상품코드</th>
                   <th>상품명</th>
-                  <th style="width:160px">옵션값</th>
+                  <th style="width:180px">옵션값 / 품목명</th>
                   <th style="width:80px" class="num">기존</th>
                   <th style="width:80px" class="num">변경</th>
                   <th style="width:80px" class="num">증감</th>
                   <th style="width:240px">매칭된 재고 품목</th>
-                  <th style="width:250px">매칭 내역</th>
+                  <th style="width:260px">매칭 내역</th>
                 </tr>
               </thead>
               <tbody id="optionsTableBody"></tbody>
@@ -286,7 +333,7 @@
           </div>
         </div>
 
-        <!-- 탭 4: 추가상품 상세 -->
+        <!-- 탭 4 (스마트스토어 전용): 추가상품 상세 -->
         <div id="tab-addons" class="tab-pane">
           <div class="table-wrapper">
             <table class="data-table">
@@ -308,21 +355,45 @@
           </div>
         </div>
 
-        <!-- 탭 5: 오늘출발 주의 -->
-        <div id="tab-drops" class="tab-pane">
+        <!-- 탭 4-B (쿠팡 전용): 노출상품명 상이 -->
+        <div id="tab-displaydiff" class="tab-pane">
           <div class="pane-notice warn-notice">
             <div>
-              <strong>⚠️ 오늘출발 가능수량 오류 예방 안내 (§9)</strong><br>
-              재고가 기존 대비 크게 감소(<span id="dropThresholdLabel">50</span>% 이상)한 상품입니다. 네이버 스마트스토어센터에 설정된 <em>오늘출발
-                가능수량</em>보다 새 재고가 작으면 업로드가 실패하므로, 사전 조정을 권장합니다.
+              <strong>👁️ 쿠팡 타 상품 노출 감지 목록 (업체 등록 상품명 vs 쿠팡 노출 상품명)</strong><br>
+              매칭은 <strong>업체 등록 상품명(H열)</strong>을 우선 적용했습니다. 단순 문구 차이는 제외하고 <strong>다른 헬멧(모델·디자인·MC코드)이나 다른 파츠·브랜드로 노출 중인 항목만</strong> 표시합니다. (검토표 엑셀 <code>노출상품명 상이</code> 시트에도 동일하게 저장됩니다.)
             </div>
-            <button id="copyDropNosBtn" class="btn btn-secondary btn-sm">📋 상품번호 일괄 복사</button>
           </div>
           <div class="table-wrapper">
             <table class="data-table">
               <thead>
                 <tr>
-                  <th style="width:130px">상품번호</th>
+                  <th style="width:135px">상이 구분</th>
+                  <th style="width:130px">업체상품 ID / 옵션ID</th>
+                  <th>업체 등록 상품명 (H열) vs 노출 상품명 (G열)</th>
+                  <th style="width:160px">등록 옵션명 (I열)</th>
+                  <th style="width:230px">매칭 비교 (등록명 vs 노출명)</th>
+                  <th style="width:210px">차이 사유</th>
+                </tr>
+              </thead>
+              <tbody id="displayDiffTableBody"></tbody>
+            </table>
+          </div>
+        </div>
+
+        <!-- 탭 5: 재고 대폭 감소 / 오늘출발 주의 -->
+        <div id="tab-drops" class="tab-pane">
+          <div class="pane-notice warn-notice">
+            <div>
+              <strong id="dropsNoticeTitle">⚠️ 재고 대폭 감소 상품 주의 안내</strong><br>
+              <span id="dropsNoticeDesc">재고가 기존 대비 크게 감소(<span id="dropThresholdLabel">50</span>% 이상)한 상품입니다. 품절 및 출고 가능 수량을 사전 점검하세요.</span>
+            </div>
+            <button id="copyDropNosBtn" class="btn btn-secondary btn-sm">📋 상품코드 일괄 복사</button>
+          </div>
+          <div class="table-wrapper">
+            <table class="data-table">
+              <thead>
+                <tr>
+                  <th style="width:135px" class="col-id-label">상품코드</th>
                   <th>상품명</th>
                   <th style="width:100px" class="num">기존 재고</th>
                   <th style="width:100px" class="num">변경 재고</th>
@@ -340,7 +411,7 @@
         <div id="tab-manual" class="tab-pane">
           <div class="pane-notice">
             <div>
-              <strong>📝 내 브라우저에 저장된 수동 매핑 · 확인완료 · 매칭해제 전체 내역</strong><br>
+              <strong>📝 현재 채널의 수동 매핑 · 확인완료 · 매칭해제 전체 내역</strong><br>
               실수로 잘못 매칭한 항목의 <strong>↩️ 매핑 삭제</strong>를 누르면 즉시 해제되어 원래 자동 매칭 또는 <strong>확인 큐</strong>로 되돌아갑니다.
             </div>
             <div class="pane-actions">
@@ -353,7 +424,7 @@
                 <option value="ignored_options">옵션·추가상품 해제</option>
               </select>
               <button id="undoActionBtnManual" class="btn btn-secondary btn-sm hidden">↩️ 방금 작업 되돌리기</button>
-              <button id="clearAllManualBtn" class="btn btn-danger btn-sm">🗑️ 수동 매핑 전체 삭제</button>
+              <button id="clearAllManualBtn" class="btn btn-danger btn-sm">🗑️ 현재 채널 수동 매핑 삭제</button>
             </div>
           </div>
           <div class="table-wrapper">
@@ -361,7 +432,7 @@
               <thead>
                 <tr>
                   <th style="width:140px">유형</th>
-                  <th style="width:145px">상품번호 / 범위</th>
+                  <th style="width:145px">코드 / 범위</th>
                   <th>상품명 / 대상</th>
                   <th style="width:320px">저장된 매핑 · 처리 내용</th>
                   <th style="width:130px">되돌리기</th>
@@ -413,24 +484,24 @@
     </div>
   </div>
 
-  <!-- 모달 2: 설정 및 매핑 관리 (§12.5) -->
+  <!-- 모달 2: 설정 및 매핑 관리 -->
   <div id="settingsModal" class="modal-backdrop hidden" role="dialog" aria-modal="true">
     <div class="modal-dialog modal-lg">
       <div class="modal-header">
-        <h3>⚙️ 설정 · 매핑 테이블 관리 (내 브라우저에 자동 저장)</h3>
+        <h3>⚙️ 설정 · 멀티채널 매핑 테이블 관리 (내 브라우저에 자동 저장)</h3>
         <button class="modal-close" data-close-modal="settingsModal">&times;</button>
       </div>
       <div class="modal-tabs">
-        <button class="modal-tab-btn active" data-mtab="basic">기본 · 모델 · 별칭</button>
-        <button class="modal-tab-btn" data-mtab="maps">수동매핑 · 고정재고 · 제외</button>
+        <button class="modal-tab-btn active" data-mtab="basic">공통 규칙 · 모델 · 별칭</button>
+        <button class="modal-tab-btn" data-mtab="maps">채널별 수동매핑 · 제외</button>
         <button class="modal-tab-btn" data-mtab="json">JSON 백업 · 복원 · 직접편집</button>
       </div>
       <div class="modal-body">
-        <!-- 설정 탭 1 -->
+        <!-- 설정 탭 1: 공통 규칙 -->
         <div id="mtab-basic" class="modal-tab-pane active">
           <div class="form-grid-2">
             <div class="form-group">
-              <label>재고조회 JSON URL (자동 연동 주소)</label>
+              <label>재고조회 JSON URL (3개 채널 공통 자동 연동 주소)</label>
               <div style="display:flex;gap:6px;align-items:center">
                 <input type="url" id="cfgInventoryUrl" class="text-input" placeholder="https://.../inventory_data.json">
                 <label class="btn btn-secondary btn-sm file-btn-label" title="PC에서 inventory_data.json 직접 열기">
@@ -444,7 +515,7 @@
               <input type="number" id="cfgHqDefault" class="text-input" min="0" value="100">
             </div>
             <div class="form-group">
-              <label>오늘출발 대폭감소 경고 임계치 (%)</label>
+              <label>재고 대폭감소 경고 임계치 (%)</label>
               <input type="number" id="cfgDropPct" class="text-input" min="1" max="100" value="50">
             </div>
             <div class="form-group">
@@ -454,7 +525,7 @@
           </div>
 
           <div class="form-group">
-            <label>별칭 사전 (<code>aliases</code> — 한 줄에 하나씩 <code>스토어표기=재고표기</code>)</label>
+            <label>공통 별칭 사전 (<code>aliases</code> — 한 줄에 하나씩 <code>스토어표기=재고표기</code>)</label>
             <textarea id="cfgAliases" class="code-textarea" rows="5" placeholder="과타라로=콰타라로&#10;로윈=라윈"></textarea>
           </div>
           <div class="form-grid-2">
@@ -469,12 +540,20 @@
           </div>
         </div>
 
-        <!-- 설정 탭 2 -->
+        <!-- 설정 탭 2: 채널별 수동매핑 -->
         <div id="mtab-maps" class="modal-tab-pane">
+          <div class="cfg-channel-bar">
+            <span id="cfgChannelBannerText">편집 대상 채널 선택 (각 채널 매핑은 서로 독립 저장됩니다):</span>
+            <select id="cfgChannelSelect" class="select-input input-sm">
+              <option value="cafe24">🔵 카페24 (자사몰)</option>
+              <option value="smartstore">🟢 네이버 스마트스토어</option>
+              <option value="coupang">🔴 쿠팡 (Wing)</option>
+            </select>
+          </div>
           <div class="form-group">
-            <label>상품번호 기준 수동 매핑 (<code>manual_map</code> — 한 줄에 <code>상품번호=재고Base1 | 재고Base2</code>)</label>
-            <textarea id="cfgManualMap" class="code-textarea" rows="6"
-              placeholder="13297488781=HJC 헬멧 알파12 안티 베놈2 마블 MC8"></textarea>
+            <label>상품 기준 수동 매핑 (<code>manual_map</code> — 한 줄에 <code>상품코드/번호=재고Base1 | 재고Base2</code>)</label>
+            <textarea id="cfgManualMap" class="code-textarea" rows="5"
+              placeholder="P0000UVP=HJC 헬멧 알파12 카본 콰타라로 르망4 MC1"></textarea>
           </div>
           <div class="form-group">
             <label>상품명 포함 문자열 수동 매핑 (<code>manual_map_by_name</code> — <code>포함문자열=재고Base</code>)</label>
@@ -482,30 +561,30 @@
               placeholder="안티 베놈 2 ANTI VENOM=HJC 헬멧 알파12 안티 베놈2 마블 MC8"></textarea>
           </div>
           <div class="form-group">
-            <label>옵션·추가상품 수동 매핑 (<code>option_manual_map</code> — <code>공통::라벨=재고품목명</code> 또는
-              <code>상품번호::라벨=재고품목명</code>)</label>
+            <label>옵션·복합옵션·추가상품 수동 매핑 (<code>option_manual_map</code> — <code>공통::라벨=재고명</code> 또는
+              <code>상품ID::라벨=재고명</code>)</label>
             <textarea id="cfgOptionManualMap" class="code-textarea" rows="3"
               placeholder="공통::[기어판 추가] 기어판 (HJ-34)=HJC C10(HJ-34P) 기어판"></textarea>
           </div>
           <div class="form-group">
-            <label>0 처리 확인 완료된 미존재 사이즈 (<code>confirmed_missing_sizes</code> — <code>상품번호=XS | S</code>)</label>
+            <label>0 처리 확인 완료된 미존재 사이즈 (<code>confirmed_missing_sizes</code> — <code>상품ID=XS | S</code>)</label>
             <textarea id="cfgConfirmedMissingSizes" class="code-textarea" rows="3"
               placeholder="12863764039=XS | S"></textarea>
           </div>
           <div class="form-grid-2">
             <div class="form-group">
               <label>고정 재고 예외 (<code>fixed_stock</code> — <code>키=수량</code>)</label>
-              <textarea id="cfgFixedStock" class="code-textarea" rows="5"
+              <textarea id="cfgFixedStock" class="code-textarea" rows="4"
                 placeholder="추가상품:i40(XD-15) 사이드커버=0"></textarea>
             </div>
             <div class="form-group">
-              <label>매칭 해제(제외) 상품번호 (<code>ignore_products</code> — 한 줄에 하나, 기존재고 유지·정상처리)</label>
-              <textarea id="cfgIgnoreProducts" class="code-textarea" rows="4" placeholder="1234567890"></textarea>
+              <label>매칭 해제(제외) 상품 (<code>ignore_products</code> — 한 줄에 하나, 기존재고 유지·정상처리)</label>
+              <textarea id="cfgIgnoreProducts" class="code-textarea" rows="4" placeholder="P0000ABC"></textarea>
             </div>
           </div>
           <div class="form-group">
             <label>매칭 해제(제외) 옵션·추가상품 (<code>ignored_options</code> — <code>공통::라벨</code> 또는
-              <code>상품번호::라벨</code>)</label>
+              <code>상품ID::라벨</code>)</label>
             <textarea id="cfgIgnoredOptions" class="code-textarea" rows="3"
               placeholder="공통::[기어판 추가] 기어판 (HJ-34)"></textarea>
           </div>
@@ -514,21 +593,21 @@
         <!-- 설정 탭 3 -->
         <div id="mtab-json" class="modal-tab-pane">
           <div class="json-toolbar">
-            <button id="cfgExportJsonBtn" class="btn btn-secondary btn-sm">📤 JSON 파일로 내보내기</button>
+            <button id="cfgExportJsonBtn" class="btn btn-secondary btn-sm">📤 전체 설정 JSON 내보내기</button>
             <label class="btn btn-secondary btn-sm file-btn-label">
-              📥 JSON 파일 불러오기
+              📥 JSON 파일 불러오기 (v2.0 백업 호환)
               <input type="file" id="cfgImportJsonInput" accept=".json" hidden>
             </label>
             <button id="cfgResetBtn" class="btn btn-danger btn-sm">♻️ 팀 기본값으로 초기화</button>
           </div>
           <div class="form-group">
-            <label>전체 설정 JSON 원본 (고급 편집)</label>
+            <label>전체 멀티채널 설정 JSON 원본 (고급 편집)</label>
             <textarea id="cfgRawJson" class="code-textarea" rows="15"></textarea>
           </div>
         </div>
       </div>
       <div class="modal-footer">
-        <span class="footer-note">저장 시 현재 브라우저에 영구 반영되며, 업로드된 엑셀이 있으면 즉시 재계산됩니다.</span>
+        <span class="footer-note">저장 시 현재 브라우저에 영구 반영되며, 업로드된 파일이 있으면 즉시 재계산됩니다.</span>
         <button class="btn btn-secondary" data-close-modal="settingsModal">닫기</button>
         <button id="saveSettingsBtn" class="btn btn-primary">설정 저장 및 적용</button>
       </div>
@@ -543,10 +622,10 @@
   <script src="https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js"></script>
 
   <!-- 앱 스크립트 -->
-  <script src="config.js?v=3"></script>
-  <script src="matcher.js?v=3"></script>
-  <script src="excel_handler.js?v=3"></script>
-  <script src="app.js?v=3"></script>
+  <script src="config.js?v=3.0.1"></script>
+  <script src="matcher.js?v=3.0.1"></script>
+  <script src="excel_handler.js?v=3.0.1"></script>
+  <script src="app.js?v=3.0.1"></script>
 </body>
 
 </html>

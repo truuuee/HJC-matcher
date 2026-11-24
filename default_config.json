@@ -7,8 +7,23 @@
   ],
   "aliases": {
     "과타라로": "콰타라로",
+    "쿼타라로": "콰타라로",
     "로윈": "라윈",
-    "퀘이즈": "퀘즈"
+    "퀘이즈": "퀘즈",
+    "HIPER": "하이퍼",
+    "DAKAR": "다카르",
+    "TEVIS": "테비스",
+    "RENO": "레노",
+    "DEREEN": "데린",
+    "PADDY": "패디",
+    "CAMET": "카멧",
+    "ASPA": "아스파",
+    "TINS": "틴스",
+    "LITO": "리토",
+    "OTTIN": "오틴",
+    "LAWIN": "라윈",
+    "BRELS": "블레스",
+    "KRAKEN": "크라켄"
   },
   "color_synonyms": {
     "앤그레이": "엔그레이",
@@ -23,15 +38,45 @@
     "플랫블랙": "세미플랫블랙",
     "매트블랙": "세미플랫블랙"
   },
-  "manual_map": {},
-  "manual_map_by_name": {
-    "안티 베놈 2 ANTI VENOM": [
-      "HJC 헬멧 알파12 안티 베놈2 마블 MC8"
-    ]
-  },
-  "option_manual_map": {},
-  "confirmed_missing_sizes": {},
-  "fixed_stock": {},
-  "ignore_products": [],
-  "ignored_options": []
+  "channels": {
+    "cafe24": {
+      "manual_map": {},
+      "manual_map_by_name": {
+        "안티 베놈 2 ANTI VENOM": [
+          "HJC 헬멧 알파12 안티 베놈2 마블 MC8"
+        ]
+      },
+      "option_manual_map": {},
+      "confirmed_missing_sizes": {},
+      "fixed_stock": {},
+      "ignore_products": [],
+      "ignored_options": []
+    },
+    "smartstore": {
+      "manual_map": {},
+      "manual_map_by_name": {
+        "안티 베놈 2 ANTI VENOM": [
+          "HJC 헬멧 알파12 안티 베놈2 마블 MC8"
+        ]
+      },
+      "option_manual_map": {},
+      "confirmed_missing_sizes": {},
+      "fixed_stock": {},
+      "ignore_products": [],
+      "ignored_options": []
+    },
+    "coupang": {
+      "manual_map": {},
+      "manual_map_by_name": {
+        "안티 베놈 2 ANTI VENOM": [
+          "HJC 헬멧 알파12 안티 베놈2 마블 MC8"
+        ]
+      },
+      "option_manual_map": {},
+      "confirmed_missing_sizes": {},
+      "fixed_stock": {},
+      "ignore_products": [],
+      "ignored_options": []
+    }
+  }
 }

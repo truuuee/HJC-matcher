@@ -501,7 +501,10 @@
     }
 
     // 1. 수동 매핑 (§5.4, §12.5): 상품번호 우선 → 상품명 포함 문자열
-    const manualByNo = config && config.manual_map && config.manual_map[productNo];
+    const effectiveCfg = (config && config.channels && !config.manual_map)
+      ? Object.assign({}, config, config.channels.smartstore || {})
+      : config;
+    const manualByNo = effectiveCfg && effectiveCfg.manual_map && effectiveCfg.manual_map[productNo];
     if (Array.isArray(manualByNo) && manualByNo.length > 0) {
       const bases = manualByNo.map(bn => index.baseMap.get(bn)).filter(Boolean);
       if (bases.length > 0) {
@@ -515,7 +518,7 @@
       }
     }
 
-    const manualByName = (config && config.manual_map_by_name) || {};
+    const manualByName = (effectiveCfg && effectiveCfg.manual_map_by_name) || {};
     const upperName = name.toUpperCase();
     for (const [substr, baseNames] of Object.entries(manualByName)) {
       if (!substr || !Array.isArray(baseNames)) continue;
@@ -637,6 +640,14 @@
       }
     }
 
+    // 색상 미표기 카본 솔리드 매칭 (예: '알파72 솔리드 카본' → '알파72 카본 솔리드')
+    if (isSolidLike && !col && carb) {
+      const matched = cands.filter(b => b.solid && b.carb && !b.color && b.v2 === v2);
+      if (matched.length > 0) {
+        return { bases: matched, method: '카본 솔리드 일치', isEstimate: false, isNewModel: false, aliasCandidates: [] };
+      }
+    }
+
     // 솔리드 매칭 실패 시 디자인명 매칭
     const designPool = cands.filter(b => b.mc && b.v2 === v2 && b.carb === carb && b.words.length > 0);
     if (designPool.length > 0) {
@@ -647,6 +658,23 @@
         return {
           bases: matched,
           method: '디자인명 일치(MC 미표기)',
+          isEstimate: false,
+          isNewModel: false,
+          aliasCandidates: []
+        };
+      }
+    }
+
+    // 디자인명 매칭 폴백: 카본 표기 차이 완화 (예: 상품명 '알파1 V2 카본 스노우 디아블로' vs 재고 '알파1 V2 스노우 디아블로 MC10SF')
+    const designRelaxed = cands.filter(b => b.mc && b.v2 === v2 && b.words.length > 0);
+    if (designRelaxed.length > 0) {
+      const scored = designRelaxed.map(b => ({ b, s: keywordScore(b, name, config) }));
+      const top = Math.max(...scored.map(x => x.s));
+      if (top >= 1.0) {
+        const matched = scored.filter(x => x.s >= 0.99).map(x => x.b);
+        return {
+          bases: matched,
+          method: '디자인명 일치(카본 표기 차이)',
           isEstimate: false,
           isNewModel: false,
           aliasCandidates: []
@@ -1019,6 +1047,9 @@
 
   // 전체 스마트스토어 상품 행 매칭 실행
   function runMatching(productRows, inventoryData, config, options = {}) {
+    const cfgRaw = (config && config.channels && !config.manual_map)
+      ? Object.assign({}, config, config.channels.smartstore || {})
+      : (config || {});
     const cfg = Object.assign({
       hq_default_stock: 100,
       drop_warning_percent: 50,
@@ -1033,7 +1064,7 @@
       fixed_stock: {},
       ignore_products: [],
       ignored_options: []
-    }, config || {});
+    }, cfgRaw);
 
     const index = buildInventoryIndex(inventoryData, cfg);
     const ignoreSet = new Set((cfg.ignore_products || []).map(String));
@@ -1468,6 +1499,7 @@
     dropWarnings.sort((a, b) => b.dropPercent - a.dropPercent || a.diff - b.diff);
 
     return {
+      channel: 'smartstore',
       meta: {
         storeTime: index.meta.store_time || '-',
         hqTime: index.meta.hq_time || '-',
@@ -1491,10 +1523,949 @@
       productSummaries,
       optionDetails,
       addonDetails,
+      displayNameDiffs: [],
       reviewQueue,
       aliasCandidates: Array.from(aliasCandidateMap.values()),
       dropWarnings,
       cellUpdates
+    };
+  }
+
+  // =========================================================================
+  // v3.0 멀티채널(카페24 · 쿠팡) 행 기반 매칭 엔진
+  // =========================================================================
+
+  const ANYWHERE_SIZE_RE = new RegExp('(?:^|[\\s\\(\\[\\/\\-,])' + SIZES_PATTERN + '(?=$|[\\s\\)\\]\\/\\-,])', 'i');
+  const SIZE_MEASURE_BRACKET_RE = /[\(\[]\s*\d{2}\s*[-~]\s*\d{2}\s*(?:cm)?\s*[\)\]]/gi;
+
+  function cleanProductNameForMatch(name) {
+    return String(name || '')
+      .replace(/^\s*(?:\[[^\]]{1,12}\]\s*)+/g, '') // [예약출고], [당일출고] 등 제거
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  function extractSizeAndDesign(optName) {
+    const raw = String(optName || '').trim();
+    if (!raw) return { size: null, designPart: '', isSingleSize: true };
+    if (/단일\s*사이즈|ONE\s*SIZE|FREE/i.test(raw)) {
+      const cleaned = raw.replace(/단일\s*사이즈|ONE\s*SIZE|FREE/gi, '').replace(/\s+/g, ' ').trim();
+      return { size: null, designPart: cleaned, isSingleSize: true };
+    }
+
+    // 치수 표기 제거 후 사이즈 토큰 탐색: 예) M [57-58cm], DEREEN MC21 S [55-56], 콰타라로레플리카 2XL
+    let withoutMeasure = raw.replace(SIZE_MEASURE_BRACKET_RE, ' ');
+    const allMatches = [];
+    const globalRe = new RegExp('(?:^|[\\s\\(\\[\\/\\-,])' + SIZES_PATTERN + '(?=$|[\\s\\)\\]\\/\\-,])', 'gi');
+    let gm;
+    while ((gm = globalRe.exec(withoutMeasure)) !== null) {
+      allMatches.push({ size: gm[1].toUpperCase(), index: gm.index, full: gm[0] });
+    }
+
+    let size = null;
+    if (allMatches.length > 0) {
+      // 보통 마지막 또는 첫 번째 유효 사이즈 (중복 표기 예: "ASPA MC1 M M (57-58)"도 동일 사이즈)
+      size = allMatches[0].size;
+    }
+
+    // 변별 텍스트(designPart) 추출: 치수 표기 및 사이즈 토큰 제거
+    let design = withoutMeasure;
+    if (size) {
+      const stripSizeRe = new RegExp('(?:^|[\\s\\(\\[\\/\\-,])' + SIZES_PATTERN + '(?=$|[\\s\\)\\]\\/\\-,])', 'gi');
+      design = design.replace(stripSizeRe, ' ');
+    }
+    design = design.replace(/^[\s\-/,]+|[\s\-/,]+$/g, '').replace(/\s+/g, ' ').trim();
+
+    return { size, designPart: design, isSingleSize: false };
+  }
+
+  function isAccessoryOrPartsProduct(pname, optionNames) {
+    const n = String(pname || '').replace(/\s+/g, '');
+    const hasHelmetWord = n.includes('헬멧') && !n.includes('헬멧전용쉴드') && !n.includes('헬멧i') && !n.includes('헬멧CH') && !n.includes('헬멧CL');
+    if (n.includes('블루투스') || n.includes('스마트HJC') || /11BC|11BS|21B|50B/i.test(n)) return 'bluetooth';
+    if (n.includes('내피') || n.includes('볼패드') || n.includes('칙패드')) return 'liner';
+    if (n.includes('쉴드') || n.includes('핀락') || n.includes('기어판') || n.includes('기어플레이트') || n.includes('사이드커버') || n.includes('선바이저')) {
+      // "썬바이저 내장 헬멧" / "썬쉴드 ... 헬멧" 같은 경우는 헬멧임!
+      const withoutSunShield = n.replace(/썬쉴드|선쉴드|썬바이저|선바이저/g, '');
+      if ((n.includes('헬멧') || n.includes('오픈페이스') || n.includes('풀페이스') || n.includes('시스템')) &&
+          !withoutSunShield.includes('쉴드') && !withoutSunShield.includes('핀락') && !withoutSunShield.includes('기어판')) {
+        return 'helmet';
+      }
+      return 'parts';
+    }
+    // 옵션들에 HJ-xx / XD-xx 코드가 있으면 파츠 상품
+    if (optionNames.some(o => SHIELD_CODE_ANY_RE.test(String(o || '')))) return 'parts';
+    if (!hasHelmetWord && SHIELD_CODE_ANY_RE.test(n)) return 'parts';
+    return 'helmet';
+  }
+
+  function findBluetoothOrPartsSingle(text, index, config) {
+    const s = String(text || '');
+    const up = s.toUpperCase();
+
+    // 1) 블루투스 정확 코드 매칭 (11BC, 21B, 50B)
+    const btMatch = up.match(/(?<![A-Z0-9])(11BC|21B|50B)(?![A-Z0-9])/);
+    if (btMatch) {
+      const code = btMatch[1];
+      const exactRe = new RegExp('(?<![A-Z0-9])' + code + '(?![A-Z0-9])', 'i');
+      const hits = index.nonHelmetItems.filter(it => exactRe.test(String(it.product_name || '').toUpperCase()));
+      if (hits.length > 0) {
+        return { items: hits, method: `블루투스 코드 일치(${code})`, isEstimate: false };
+      }
+    }
+
+    // 2) 변색 핀락 / 변색 쉴드 (모델명 또는 HJ 코드)
+    const noSp = s.replace(/\s+/g, '');
+    const code = extractShieldCode(s, false);
+    if (noSp.includes('변색') && noSp.includes('핀락')) {
+      const model = modelOf(s, index.models);
+      let hits = index.nonHelmetItems.filter(it => invPart(it.product_name) === '변색핀락');
+      if (code) hits = hits.filter(it => String(it.product_name || '').toUpperCase().includes(code));
+      else if (model) hits = hits.filter(it => modelOf(it.product_name, index.models) === model);
+      if (hits.length === 1) {
+        return { items: hits, method: `변색핀락 일치(${code || model})`, isEstimate: false };
+      }
+    }
+
+    // 3) 일반 쉴드/핀락/기어판/사이드커버/변색쉴드
+    const part = partOf(s);
+    if (code && part) {
+      const res = findShield(code, part, index);
+      if (res.items.length > 0) return res;
+    }
+
+    // 4) 내피세트 매칭 (모델명 + 내피 + 사이즈)
+    if (noSp.includes('내피')) {
+      const model = modelOf(s, index.models);
+      const { size } = extractSizeAndDesign(s);
+      if (model && size) {
+        const sizeParenRe = new RegExp('\\(\\s*' + escapeRegex(size) + '\\s*\\)', 'i');
+        const hits = index.nonHelmetItems.filter(it => {
+          const nm = String(it.product_name || '');
+          return nm.includes('내피') && modelOf(nm, index.models) === model && sizeParenRe.test(nm);
+        });
+        if (hits.length === 1) {
+          return { items: hits, method: `내피 모델/사이즈 일치(${model}/${size})`, isEstimate: false };
+        }
+      }
+    }
+
+    return { items: [], method: '단일/파츠 매칭실패', isEstimate: false };
+  }
+
+  function augmentDesignHint(productName, designPart) {
+    let hint = String(designPart || '').trim();
+    if (!hint) return productName;
+    // '카본 무광' 등 무광 힌트 보강
+    if (hint.includes('무광') && !hint.includes('블랙') && productName.includes('블랙')) {
+      hint += ' 매트블랙';
+    }
+    return `${productName} ${hint}`.trim();
+  }
+
+  function normalizeForDisplayCompare(str) {
+    return String(str || '')
+      .toUpperCase()
+      .replace(/RPHA\s*(\d+)/g, '알파$1')
+      .replace(/알파\s*(\d+)/g, '알파$1')
+      .replace(/홍진/g, 'HJC')
+      .replace(/[^A-Z0-9가-힣]/g, '');
+  }
+
+  function stripCoupangDisplayOptions(displayName) {
+    // 쿠팡 노출 상품명은 보통 "상품명, 옵션1, 옵션2" 형태 → 첫 쉼표 앞 본체 추출
+    const s = String(displayName || '').trim();
+    const parts = s.split(',');
+    return parts[0].trim();
+  }
+
+  /**
+   * 쿠팡 업체 등록 상품명(H열+I열) vs 쿠팡 노출 상품명(G열) 실제 타 상품 노출 감지
+   * - 단순 제목 문구 차이(HJC vs 홍진, 수식어 어순 등)는 제외
+   * - 실제로 다른 헬멧(다른 모델·디자인·MC코드), 다른 파츠/옵션, 타 브랜드로 노출 중인 항목만 반환
+   */
+  function evaluateCoupangDisplayDiff(item, regMatchedNames, category, index, cfg) {
+    const regName = String(item.productName || '').trim();
+    const optName = String(item.optionName || '').trim();
+    const dispRaw = String(item.displayProductName || '').trim();
+    if (!dispRaw || !regName) return null;
+
+    const regFull = `${regName} ${optName}`.trim();
+    const dispSegments = dispRaw.split(',').map(s => s.trim()).filter(Boolean);
+    const dispCore = dispSegments[0] || dispRaw;
+    const dispOptTail = dispSegments.slice(1).join(' ').trim();
+
+    let dispMatchedNames = [];
+    let severity = '';
+    let reason = '';
+
+    if (category === 'helmet') {
+      const dispForMatch = (dispRaw.includes('무광') && dispRaw.includes('블랙')) ? `${dispRaw} 매트블랙` : dispRaw;
+      const dispGrp = findHelmetGroup({ productNo: '__disp__', productName: dispForMatch }, index, cfg);
+      dispMatchedNames = (dispGrp.bases || []).map(b => b.name);
+
+      const regSet = new Set(regMatchedNames);
+      const dispSet = new Set(dispMatchedNames);
+
+      // 1) 매칭된 헬멧 Base 자체가 서로 다름 (예: i31 DEPE MC21 vs i31 DEPE MC5 / i31 DEPE vs i31 테비스)
+      if (regSet.size > 0 && dispSet.size > 0) {
+        const hasOverlap = [...regSet].some(x => dispSet.has(x));
+        if (!hasOverlap) {
+          severity = '다른 헬멧 노출';
+          reason = '등록 상품과 쿠팡 노출 상품이 서로 다른 헬멧으로 매칭됨';
+        }
+      }
+
+      // 2) 모델명 불일치 (예: 알파12 vs 알파11, i31 vs i30)
+      const regModel = modelOf(regFull, index.models);
+      const dispModel = modelOf(dispRaw, index.models);
+      if (!severity && regModel && dispModel && regModel !== dispModel) {
+        severity = '다른 모델 노출';
+        reason = `모델명 상이 (등록: ${regModel} vs 노출: ${dispModel})`;
+      }
+
+      // 3) MC코드 불일치 (예: MC21 vs MC5)
+      const regMc = mcOf(regFull);
+      const dispMc = mcOf(dispRaw);
+      if (!severity && regMc && dispMc) {
+        const numDiff = regMc[0] !== dispMc[0];
+        const sufDiff = Boolean(regMc[1] && dispMc[1] && regMc[1] !== dispMc[1]);
+        if (numDiff || sufDiff) {
+          severity = '다른 MC코드 노출';
+          reason = `MC코드 상이 (등록: MC${regMc[0]}${regMc[1]} vs 노출: MC${dispMc[0]}${dispMc[1]})`;
+        }
+      }
+
+      // 4) MC 미표기 상태에서도 노출명에 같은 모델의 다른 디자인명이 명시된 경우 (예: 등록 i31 DEPE vs 노출 i31 TEVIS 테비스)
+      if (!severity && regModel && dispMatchedNames.length === 0) {
+        const sameModelBases = (index.basesByModel.get(regModel) || []).filter(b => b.words.length > 0 && !regSet.has(b.name));
+        const otherHits = sameModelBases.filter(b => {
+          const dispScore = keywordScore(b, dispRaw, cfg);
+          const regScore = keywordScore(b, regFull, cfg);
+          return dispScore >= 1.0 && regScore < 0.5;
+        });
+        if (otherHits.length > 0) {
+          dispMatchedNames = otherHits.map(b => b.name);
+          severity = '다른 디자인 노출';
+          reason = `노출 상품명에 다른 디자인(${otherHits[0].words.join(' ')})이 표기됨`;
+        }
+      }
+
+      // 5) 타 브랜드/전혀 다른 상품 묶임 (등록은 HJC인데 노출명에 HJC·홍진·RPHA·알파·모델 단서 전무)
+      if (!severity) {
+        const regIsHjc = /HJC|홍진|RPHA|알파/i.test(regName);
+        const dispHasHjcHint = /HJC|홍진|RPHA|알파/i.test(dispRaw) || Boolean(dispModel);
+        if (regIsHjc && !dispHasHjcHint) {
+          severity = '타 상품/브랜드 노출';
+          reason = '쿠팡 노출 상품명에 HJC 브랜드/모델 정보가 없어 타 상품 묶임 의심';
+        }
+      }
+    } else if (category === 'parts' || category === 'bluetooth') {
+      // 쉴드/파츠는 쉼표 뒤 실제 옵션 영역(dispOptTail)에서 부품/색상을 우선 추출해 상품명 내 나열어("기어판 핀락 모음") 오탐 방지
+      const regCode = extractShieldCode(optName, false) || extractShieldCode(regName, false);
+      const dispCode = extractShieldCode(dispOptTail, false) || extractShieldCode(dispCore, false);
+
+      if (category === 'bluetooth') {
+        const dispPartRes = findBluetoothOrPartsSingle(dispRaw, index, cfg);
+        dispMatchedNames = (dispPartRes.items || []).map(it => it.product_name);
+      } else {
+        const dispPart = partOf(dispOptTail) || (!dispOptTail ? partOf(dispCore) : null);
+        if (dispCode && dispPart) {
+          const dispShieldRes = findShield(dispCode, dispPart, index);
+          dispMatchedNames = (dispShieldRes.items || []).map(it => it.product_name);
+        } else if (!dispOptTail) {
+          const dispSingleRes = findBluetoothOrPartsSingle(dispRaw, index, cfg);
+          dispMatchedNames = (dispSingleRes.items || []).map(it => it.product_name);
+        }
+      }
+
+      const regSet = new Set(regMatchedNames);
+      const dispSet = new Set(dispMatchedNames);
+      if (regSet.size > 0 && dispSet.size > 0) {
+        const hasOverlap = [...regSet].some(x => dispSet.has(x));
+        if (!hasOverlap) {
+          severity = '다른 파츠/옵션 노출';
+          reason = '등록 옵션과 쿠팡 노출 옵션의 매칭 품목이 서로 다름';
+        }
+      } else if (regCode && dispCode && regCode !== dispCode && !dispCode.startsWith(regCode) && !regCode.startsWith(dispCode)) {
+        severity = '다른 파츠코드 노출';
+        reason = `파츠 코드 상이 (등록: ${regCode} vs 노출: ${dispCode})`;
+      }
+    }
+
+    if (!severity) return null;
+
+    return {
+      severity,
+      isMatchMismatch: true,
+      productNo: item.productNo,
+      optionId: item.optionId,
+      registeredName: regName,
+      displayName: dispRaw,
+      optionName: optName,
+      registeredMatched: regMatchedNames.length > 0 ? regMatchedNames.join(' + ') : '(미매칭)',
+      displayMatched: dispMatchedNames.length > 0 ? dispMatchedNames.join(' + ') : '(미매칭/비교불가)',
+      reason
+    };
+  }
+
+  /**
+   * 카페24 · 쿠팡 등 행 기반(1행 = 1품목/옵션) 채널 통합 매칭 실행
+   */
+  function runChannelMatching(channel, itemRows, inventoryData, config, options = {}) {
+    const ch = channel === 'cafe24' ? 'cafe24' : 'coupang';
+    const cfgRaw = (config && config.channels && !config.manual_map)
+      ? Object.assign({}, config, config.channels[ch] || {})
+      : (config || {});
+    const cfg = Object.assign({
+      hq_default_stock: 100,
+      drop_warning_percent: 50,
+      models_extra: [],
+      aliases: {},
+      color_synonyms: {},
+      color_fallback: {},
+      manual_map: {},
+      manual_map_by_name: {},
+      option_manual_map: {},
+      confirmed_missing_sizes: {},
+      fixed_stock: {},
+      ignore_products: [],
+      ignored_options: []
+    }, cfgRaw);
+
+    const onlyChangedCoupang = options.coupangOnlyChanged !== false;
+    const index = buildInventoryIndex(inventoryData, cfg);
+    const ignoreSet = new Set((cfg.ignore_products || []).map(String));
+
+    // 상품코드 / 업체상품 ID 단위로 그룹핑 (순서 보존)
+    const productOrder = [];
+    const itemsByProduct = new Map();
+    for (const item of itemRows) {
+      const pno = String(item.productNo || '').trim();
+      if (!itemsByProduct.has(pno)) {
+        itemsByProduct.set(pno, []);
+        productOrder.push(pno);
+      }
+      itemsByProduct.get(pno).push(item);
+    }
+
+    const productSummaries = [];
+    const optionDetails = [];
+    const reviewQueue = [];
+    const displayNameDiffs = [];
+    const aliasCandidateMap = new Map();
+    const dropWarnings = [];
+    const rowUpdates = [];
+
+    let oldTotalSum = 0;
+    let newTotalSum = 0;
+    let statusCounts = { 정상: 0, 주의: 0, 확인필요: 0, 미반영: 0, 제외: 0 };
+    let coupangWriteCount = 0;
+    let uneditableCount = 0;
+
+    for (const pno of productOrder) {
+      const groupItems = itemsByProduct.get(pno);
+      const first = groupItems[0];
+      const rawPname = String(first.productName || '').trim();
+      const cleanPname = cleanProductNameForMatch(rawPname);
+      const sellerCode = String(first.sellerCode || '').trim();
+      const oldProdTotal = groupItems.reduce((acc, it) => acc + (Number(it.oldStock) || 0), 0);
+
+      // 1) 상품 단위 수동 매핑 해제(제외)
+      if (ignoreSet.has(pno)) {
+        oldTotalSum += oldProdTotal;
+        newTotalSum += oldProdTotal;
+        statusCounts['정상']++;
+
+        for (const it of groupItems) {
+          const oldVal = Number(it.oldStock) || 0;
+          optionDetails.push({
+            productNo: pno,
+            optionId: it.optionId || '',
+            productName: rawPname,
+            optionValue: it.optionName || '(단일상품)',
+            oldStock: oldVal,
+            newStock: oldVal,
+            matchedItems: '(매핑 해제 · 기존유지)',
+            detail: '수동 매핑 해제 (기존재고 유지 · 정상처리)',
+            isFail: false,
+            isEstimate: false,
+            isNoSize: false,
+            sActionLabel: ch === 'coupang' ? '제외(빈칸)' : ''
+          });
+          rowUpdates.push({
+            rowIndex: it.rowIndex,
+            dataIdx: it.dataIdx,
+            productNo: pno,
+            optionId: it.optionId || '',
+            oldStock: oldVal,
+            newStock: oldVal,
+            canWriteS: false
+          });
+        }
+
+        productSummaries.push({
+          rowIndex: first.rowIndex,
+          productNo: pno,
+          productName: rawPname,
+          optionType: groupItems.length > 1 || first.optionName ? '조합형' : '설정안함',
+          optionName: groupItems.length > 1 || first.optionName ? '옵션' : '',
+          oldTotal: oldProdTotal,
+          newTotal: oldProdTotal,
+          diff: 0,
+          status: '정상',
+          failOpts: 0,
+          estOpts: 0,
+          noSizeOpts: 0,
+          addonFail: 0,
+          addonEst: 0,
+          matchMethod: '수동 매핑 해제 (기존재고 유지)',
+          matchedSummary: '(매핑 해제 · 기존유지)',
+          isIgnored: true
+        });
+        continue;
+      }
+
+      const optNames = groupItems.map(it => it.optionName || '');
+      const parsedOpts = groupItems.map(it => extractSizeAndDesign(it.optionName || ''));
+      const category = isAccessoryOrPartsProduct(cleanPname, optNames);
+      const hasAnySize = parsedOpts.some(p => p.size !== null);
+      const isSingleItemProduct = groupItems.length === 1 && (!first.optionName || parsedOpts[0].isSingleSize);
+
+      // 복합 옵션(한 상품 내 여러 디자인/MC코드/유광·무광 존재) 판별
+      const distinctDesigns = new Set(parsedOpts.map(p => p.designPart).filter(Boolean));
+      const hasDesignInfoInOpt = Array.from(distinctDesigns).some(d =>
+        Boolean(mcOf(d)) || d.includes('유광') || d.includes('무광') || colorOf(d, cfg) !== null || distinctDesigns.size >= 2
+      );
+      const isMultiDesignHelmet = category === 'helmet' && hasAnySize && hasDesignInfoInOpt && !cfg.manual_map[pno];
+
+      let prodNewTotal = 0;
+      let failOpts = 0;
+      let estOpts = 0;
+      let noSizeOpts = 0;
+      const totalOpts = groupItems.length;
+      const methodSet = new Set();
+      const matchedNameSet = new Set();
+
+      // 상품 단위 헬멧 그룹(단순 사이즈 헬멧일 때 1회만 계산)
+      let productHelmetGrp = null;
+      let productHelmetMissingSizes = [];
+      if (category === 'helmet' && hasAnySize && !isMultiDesignHelmet) {
+        productHelmetGrp = findHelmetGroup({
+          productNo: pno,
+          productName: cleanPname,
+          sellerCode,
+          sellerBarcode: first.sellerBarcode || ''
+        }, index, cfg);
+
+        // 카페24 자체상품코드에 모델/MC가 더 명확한 경우 보조 재시도
+        if (productHelmetGrp.bases.length === 0 && sellerCode && sellerCode.toUpperCase() !== cleanPname.toUpperCase()) {
+          const retry = findHelmetGroup({
+            productNo: pno,
+            productName: `${cleanPname} ${sellerCode}`,
+            sellerCode: '',
+            sellerBarcode: ''
+          }, index, cfg);
+          if (retry.bases.length > 0) {
+            productHelmetGrp = retry;
+            productHelmetGrp.method = `${retry.method} (자체코드 보조)`;
+          }
+        }
+
+        for (const ac of productHelmetGrp.aliasCandidates || []) {
+          const key = `${ac.from}=>${ac.to}`;
+          if (!aliasCandidateMap.has(key)) aliasCandidateMap.set(key, ac);
+        }
+      }
+
+      // 복합 옵션 헬멧 그룹 캐시 (designPart -> { grp, missingSizes })
+      const designGroupCache = new Map();
+      const designGroupQueueEmitted = new Set();
+
+      for (let i = 0; i < groupItems.length; i++) {
+        const it = groupItems[i];
+        const optInfo = parsedOpts[i];
+        const ovRaw = String(it.optionName || '').trim();
+        const ovLabel = ovRaw || '(단일상품)';
+        const oldVal = Number(it.oldStock) || 0;
+
+        // 쿠팡 수정 불가 행(승인대기/옵션ID 없음) 보호
+        if (ch === 'coupang' && !it.isEditable) {
+          uneditableCount++;
+          prodNewTotal += oldVal;
+          optionDetails.push({
+            productNo: pno,
+            optionId: it.optionId || '',
+            productName: rawPname,
+            optionValue: ovLabel,
+            oldStock: oldVal,
+            newStock: oldVal,
+            matchedItems: '(수정 불가 행)',
+            detail: `수정 불가 보호 (승인상태: ${it.approvalStatus || '옵션ID 없음'})`,
+            isFail: false,
+            isEstimate: false,
+            isNoSize: false,
+            sActionLabel: '수정불가(보호)'
+          });
+          rowUpdates.push({
+            rowIndex: it.rowIndex,
+            dataIdx: it.dataIdx,
+            productNo: pno,
+            optionId: it.optionId || '',
+            oldStock: oldVal,
+            newStock: oldVal,
+            canWriteS: false
+          });
+          continue;
+        }
+
+        let calcNew = oldVal;
+        let detail = '';
+        let matchedLabel = '-';
+        let isFail = false;
+        let isEst = false;
+        let isNoSz = false;
+        let isManualIgnoredOpt = false;
+        let regMatchedForDiff = [];
+
+        // (A) 단순 사이즈 헬멧 상품
+        if (category === 'helmet' && hasAnySize && !isMultiDesignHelmet && optInfo.size) {
+          const grp = productHelmetGrp;
+          methodSet.add(grp.method);
+          const bases = grp.bases || [];
+          const mergedSizes = mergeBaseSizes(bases);
+          const size = optInfo.size;
+          regMatchedForDiff = bases.map(b => b.name);
+          if (bases.length > 0) {
+            matchedLabel = bases.map(b => b.name).join(' + ');
+            bases.forEach(b => matchedNameSet.add(b.name));
+          }
+
+          const confirmedSet = new Set(
+            ((cfg.confirmed_missing_sizes && cfg.confirmed_missing_sizes[pno]) || []).map(s => String(s).toUpperCase())
+          );
+          const fixedHit = checkFixedStock(cfg, [`${pno}:${ovRaw}`, `${pno}:${size}`, it.optionId ? `${pno}:${it.optionId}` : '']);
+
+          if (fixedHit) {
+            calcNew = fixedHit.value;
+            detail = `고정재고 예외(${fixedHit.key}=${fixedHit.value})`;
+          } else if (bases.length > 0) {
+            if (mergedSizes[size]) {
+              const [st, hq] = mergedSizes[size];
+              calcNew = newStock(st, hq, cfg.hq_default_stock);
+              isEst = grp.isEstimate;
+              if (isEst) estOpts++;
+              detail = `${grp.method} / ${size} (매장:${st}, 본사:${hq ? 'O' : 'X'})`;
+            } else {
+              calcNew = 0;
+              const isManualDone = grp.method === '수동매핑(상품번호)';
+              if (confirmedSet.has(size) || isManualDone) {
+                detail = `${isManualDone ? '수동매핑 확정' : '확인완료'}: 재고목록에 ${size} 사이즈 없음 → 0`;
+              } else {
+                isNoSz = true;
+                noSizeOpts++;
+                if (!productHelmetMissingSizes.includes(size)) productHelmetMissingSizes.push(size);
+                detail = `주의: 재고목록에 ${size} 사이즈 없음 → 0`;
+              }
+            }
+          } else {
+            calcNew = oldVal;
+            isFail = true;
+            failOpts++;
+            detail = `★매칭실패 (${grp.method} → 기존유지)`;
+          }
+        }
+        // (B) 복합 옵션 헬멧 상품 (예: 쿠팡 한 상품 내 여러 그래픽/MC코드 + 사이즈)
+        else if (isMultiDesignHelmet && optInfo.size) {
+          const dKey = optInfo.designPart || ovRaw;
+          const mapKey = `${pno}::${dKey}`;
+          const optIgnored = isIgnoredOption(cfg, [mapKey, `${pno}::${ovRaw}`, it.optionId ? `${pno}::${it.optionId}` : '']);
+
+          if (optIgnored) {
+            isManualIgnoredOpt = true;
+            calcNew = oldVal;
+            matchedLabel = '(매핑 해제 · 기존유지)';
+            detail = '수동 매핑 해제 (기존재고 유지 · 정상처리)';
+            methodSet.add('옵션 매핑 해제');
+          } else {
+            if (!designGroupCache.has(dKey)) {
+              // option_manual_map에서 헬멧 Base 조회 우선
+              const manualOptTargets = (cfg.option_manual_map && (cfg.option_manual_map[mapKey] || cfg.option_manual_map[`공통::${dKey}`])) || null;
+              let grp;
+              if (Array.isArray(manualOptTargets) && manualOptTargets.length > 0) {
+                const bases = manualOptTargets.map(bn => index.baseMap.get(bn)).filter(Boolean);
+                if (bases.length > 0) {
+                  grp = { bases, method: '수동매핑(복합옵션)', isEstimate: false, isNewModel: false, aliasCandidates: [] };
+                }
+              }
+              if (!grp) {
+                const combinedName = augmentDesignHint(cleanPname, optInfo.designPart);
+                grp = findHelmetGroup({
+                  productNo: '__opt__',
+                  productName: combinedName,
+                  sellerCode: it.itemSellerCode || '',
+                  sellerBarcode: it.sellerBarcode || ''
+                }, index, cfg);
+              }
+              for (const ac of grp.aliasCandidates || []) {
+                const ak = `${ac.from}=>${ac.to}`;
+                if (!aliasCandidateMap.has(ak)) aliasCandidateMap.set(ak, ac);
+              }
+              designGroupCache.set(dKey, { grp, missingSizes: [] });
+            }
+
+            const entry = designGroupCache.get(dKey);
+            const grp = entry.grp;
+            const bases = grp.bases || [];
+            const mergedSizes = mergeBaseSizes(bases);
+            const size = optInfo.size;
+            methodSet.add(`복합옵션(${grp.method})`);
+            regMatchedForDiff = bases.map(b => b.name);
+            if (bases.length > 0) {
+              matchedLabel = bases.map(b => b.name).join(' + ');
+              bases.forEach(b => matchedNameSet.add(b.name));
+            }
+
+            const confirmedSet = new Set([
+              ...((cfg.confirmed_missing_sizes && cfg.confirmed_missing_sizes[pno]) || []),
+              ...((cfg.confirmed_missing_sizes && cfg.confirmed_missing_sizes[mapKey]) || [])
+            ].map(s => String(s).toUpperCase()));
+
+            const fixedHit = checkFixedStock(cfg, [`${pno}:${ovRaw}`, it.optionId ? `${pno}:${it.optionId}` : '']);
+            if (fixedHit) {
+              calcNew = fixedHit.value;
+              detail = `고정재고 예외(${fixedHit.key}=${fixedHit.value})`;
+            } else if (bases.length > 0) {
+              if (mergedSizes[size]) {
+                const [st, hq] = mergedSizes[size];
+                calcNew = newStock(st, hq, cfg.hq_default_stock);
+                isEst = grp.isEstimate;
+                if (isEst) estOpts++;
+                detail = `${grp.method} / ${size} (매장:${st}, 본사:${hq ? 'O' : 'X'})`;
+              } else {
+                calcNew = 0;
+                const isManualDone = grp.method === '수동매핑(복합옵션)';
+                if (confirmedSet.has(size) || isManualDone) {
+                  detail = `${isManualDone ? '수동매핑 확정' : '확인완료'}: 재고목록에 ${size} 사이즈 없음 → 0`;
+                } else {
+                  isNoSz = true;
+                  noSizeOpts++;
+                  if (!entry.missingSizes.includes(size)) entry.missingSizes.push(size);
+                  detail = `주의: 재고목록에 ${size} 사이즈 없음 → 0`;
+                }
+              }
+            } else {
+              calcNew = oldVal;
+              isFail = true;
+              failOpts++;
+              detail = `★매칭실패 (${grp.method} → 기존유지)`;
+            }
+
+            if ((bases.length === 0 || grp.isEstimate) && !designGroupQueueEmitted.has(dKey)) {
+              designGroupQueueEmitted.add(dKey);
+              reviewQueue.push({
+                queueType: bases.length === 0 ? (grp.isNewModel ? '재고 미등록 신제품' : '매칭 실패') : '저신뢰 매칭',
+                productNo: pno,
+                productName: rawPname,
+                targetType: 'helmet-group',
+                optionValue: dKey,
+                reason: `${grp.method} (옵션 그룹: ${dKey})`,
+                currentAction: bases.length === 0 ? '기존 재고 유지' : '추정 계산 반영',
+                candidates: rankHelmetCandidates(augmentDesignHint(cleanPname, optInfo.designPart), index, cfg, 3)
+              });
+            }
+          }
+        }
+        // (C) 단일 상품 / 쉴드 / 파츠 / 블루투스 / 내피
+        else {
+          const optKeyLabel = ovRaw || '(단일상품)';
+          const optIgnored = isIgnoredOption(cfg, [
+            `${pno}::${optKeyLabel}`,
+            `공통::${optKeyLabel}`,
+            it.optionId ? `${pno}::${it.optionId}` : ''
+          ]);
+
+          if (optIgnored) {
+            isManualIgnoredOpt = true;
+            calcNew = oldVal;
+            matchedLabel = '(매핑 해제 · 기존유지)';
+            detail = '수동 매핑 해제 (기존재고 유지 · 정상처리)';
+            methodSet.add('옵션 매핑 해제');
+          } else {
+            const fixedHit = checkFixedStock(cfg, [
+              pno,
+              `${pno}:${optKeyLabel}`,
+              `옵션:${optKeyLabel}`,
+              it.optionId ? `${pno}:${it.optionId}` : ''
+            ]);
+
+            if (fixedHit) {
+              calcNew = fixedHit.value;
+              matchedLabel = fixedHit.key;
+              detail = `고정재고 예외(${fixedHit.key}=${fixedHit.value})`;
+              methodSet.add('고정재고 예외');
+            } else {
+              // 1) 수동 매핑 조회 (옵션 수동매핑 우선 → 단일상품일 때 manual_map)
+              let res = lookupOptionManualMap(cfg, index, [
+                it.optionId ? `${pno}::${it.optionId}` : '',
+                `${pno}::${optKeyLabel}`,
+                `공통::${optKeyLabel}`
+              ]);
+              if (!res && isSingleItemProduct) {
+                const manualNames = (cfg.manual_map && cfg.manual_map[pno]) || findManualByName(rawPname, cfg);
+                if (Array.isArray(manualNames) && manualNames.length > 0) {
+                  const matched = index.items.filter(x => manualNames.includes(x.product_name));
+                  if (matched.length > 0) {
+                    res = { items: matched, method: '수동매핑', isEstimate: false };
+                  }
+                }
+              }
+
+              // 2) 자동 매칭: 쉴드/파츠/블루투스/내피
+              if (!res) {
+                const prodCode = extractShieldCode(cleanPname, false) || extractShieldCode(sellerCode, false);
+                const optCode = extractShieldCode(ovRaw, true) || extractShieldCode(ovRaw, false);
+                const code = optCode || prodCode;
+                const part = partOf(ovRaw) || partOf(cleanPname);
+
+                if (code && part && !(cleanPname.includes('변색') && cleanPname.includes('핀락'))) {
+                  res = findShield(code, part, index);
+                } else {
+                  const combined = `${cleanPname} ${ovRaw} ${sellerCode}`.trim();
+                  res = findBluetoothOrPartsSingle(combined, index, cfg);
+                }
+              }
+
+              const items = (res && res.items) || [];
+              const mNames = items.map(x => x.product_name);
+              regMatchedForDiff = mNames;
+              methodSet.add((res && res.method) || '파츠/단일 매칭');
+
+              if (items.length > 0) {
+                const st = items.reduce((acc, c) => acc + (Number(c.store_stock) || 0), 0);
+                const hq = items.some(c => String(c.hq_stock || '').toUpperCase() === 'O');
+                calcNew = newStock(st, hq, cfg.hq_default_stock);
+                isEst = Boolean(res.isEstimate);
+                if (isEst) estOpts++;
+                matchedLabel = mNames.join(' / ');
+                mNames.forEach(n => matchedNameSet.add(n));
+                detail = `${res.method} (매장:${st}, 본사:${hq ? 'O' : 'X'})`;
+              } else {
+                calcNew = oldVal;
+                isFail = true;
+                failOpts++;
+                detail = `★매칭실패 (${(res && res.method) || '재고 없음'} → 기존유지)`;
+
+                reviewQueue.push({
+                  queueType: isSingleItemProduct ? '매칭 실패' : '옵션/파츠 미매칭',
+                  productNo: pno,
+                  productName: rawPname,
+                  targetType: isSingleItemProduct ? 'single' : 'shield-option',
+                  optionValue: optKeyLabel,
+                  reason: (res && res.method) || '일치하는 재고 없음',
+                  currentAction: '기존 재고 유지',
+                  candidates: rankGeneralItemCandidates(`${cleanPname} ${ovRaw}`, index, 3)
+                });
+              }
+
+              if (isEst) {
+                reviewQueue.push({
+                  queueType: '저신뢰 매칭',
+                  productNo: pno,
+                  productName: rawPname,
+                  targetType: isSingleItemProduct ? 'single' : 'shield-option',
+                  optionValue: optKeyLabel,
+                  reason: res.method,
+                  currentAction: '추정 계산 반영',
+                  candidates: rankGeneralItemCandidates(`${cleanPname} ${ovRaw}`, index, 3)
+                });
+              }
+            }
+          }
+        }
+
+        // 쿠팡 노출상품명(G열) vs 업체등록명(H열) 상이 감지
+        if (ch === 'coupang') {
+          const diffInfo = evaluateCoupangDisplayDiff(it, regMatchedForDiff, category, index, cfg);
+          if (diffInfo) displayNameDiffs.push(diffInfo);
+        }
+
+        prodNewTotal += calcNew;
+
+        const canWriteS = ch === 'coupang' ? (!isFail && !isManualIgnoredOpt && it.isEditable) : true;
+        const willWriteS = canWriteS && (!onlyChangedCoupang || calcNew !== oldVal);
+        if (ch === 'coupang' && willWriteS) coupangWriteCount++;
+
+        let sActionLabel = '';
+        if (ch === 'coupang') {
+          if (!canWriteS) sActionLabel = isFail ? '미매칭(빈칸)' : '제외(빈칸)';
+          else if (willWriteS) sActionLabel = `입력(${calcNew})`;
+          else sActionLabel = '변동없음(빈칸)';
+        }
+
+        optionDetails.push({
+          productNo: pno,
+          optionId: it.optionId || '',
+          productName: rawPname,
+          optionValue: ovLabel,
+          oldStock: oldVal,
+          newStock: calcNew,
+          matchedItems: matchedLabel,
+          detail,
+          isFail,
+          isEstimate: isEst,
+          isNoSize: isNoSz,
+          sActionLabel
+        });
+
+        rowUpdates.push({
+          rowIndex: it.rowIndex,
+          dataIdx: it.dataIdx,
+          productNo: pno,
+          optionId: it.optionId || '',
+          oldStock: oldVal,
+          newStock: calcNew,
+          canWriteS
+        });
+      }
+
+      // 단순 사이즈 헬멧 확인 큐 등록
+      if (category === 'helmet' && hasAnySize && !isMultiDesignHelmet && productHelmetGrp) {
+        const bases = productHelmetGrp.bases || [];
+        if (bases.length === 0 || productHelmetGrp.isEstimate) {
+          reviewQueue.push({
+            queueType: bases.length === 0 ? (productHelmetGrp.isNewModel ? '재고 미등록 신제품' : '매칭 실패') : '저신뢰 매칭',
+            productNo: pno,
+            productName: rawPname,
+            targetType: 'helmet',
+            optionValue: `옵션 ${totalOpts}개`,
+            reason: productHelmetGrp.method,
+            currentAction: bases.length === 0 ? '기존 재고 유지' : '추정 계산 반영',
+            candidates: rankHelmetCandidates(sellerCode ? `${cleanPname} ${sellerCode}` : cleanPname, index, cfg, 3)
+          });
+        } else if (productHelmetMissingSizes.length > 0) {
+          const matchedNames = bases.map(b => b.name).join(' + ');
+          reviewQueue.push({
+            queueType: '사이즈 없음',
+            productNo: pno,
+            productName: rawPname,
+            targetType: 'helmet-size',
+            optionValue: productHelmetMissingSizes.join(', '),
+            missingSizes: [...productHelmetMissingSizes],
+            matchedBaseNames: bases.map(b => b.name),
+            reason: `매칭됨(${matchedNames}) / 미존재 사이즈: ${productHelmetMissingSizes.join(', ')}`,
+            currentAction: '0 처리 (주의)',
+            candidates: rankHelmetCandidates(cleanPname, index, cfg, 3)
+          });
+        }
+      }
+
+      // 복합 옵션 헬멧의 미존재 사이즈 확인 큐 등록
+      if (isMultiDesignHelmet) {
+        for (const [dKey, entry] of designGroupCache.entries()) {
+          if (entry.missingSizes.length > 0) {
+            const matchedNames = (entry.grp.bases || []).map(b => b.name).join(' + ');
+            reviewQueue.push({
+              queueType: '사이즈 없음',
+              productNo: pno,
+              productName: `${rawPname} [${dKey}]`,
+              targetType: 'helmet-size',
+              confirmKey: `${pno}::${dKey}`,
+              optionValue: entry.missingSizes.join(', '),
+              missingSizes: [...entry.missingSizes],
+              matchedBaseNames: (entry.grp.bases || []).map(b => b.name),
+              reason: `매칭됨(${matchedNames}) / 미존재 사이즈: ${entry.missingSizes.join(', ')}`,
+              currentAction: '0 처리 (주의)',
+              candidates: rankHelmetCandidates(augmentDesignHint(cleanPname, dKey), index, cfg, 3)
+            });
+          }
+        }
+      }
+
+      let status = '정상';
+      if (failOpts === totalOpts && totalOpts > 0) status = '미반영';
+      else if (failOpts > 0 || estOpts > 0) status = '확인필요';
+      else if (noSizeOpts > 0) status = '주의';
+
+      statusCounts[status] = (statusCounts[status] || 0) + 1;
+      oldTotalSum += oldProdTotal;
+      newTotalSum += prodNewTotal;
+
+      if (oldProdTotal > 0 && prodNewTotal < oldProdTotal) {
+        const dropPct = Math.round(((oldProdTotal - prodNewTotal) / oldProdTotal) * 100);
+        if (dropPct >= cfg.drop_warning_percent) {
+          dropWarnings.push({
+            productNo: pno,
+            productName: rawPname,
+            oldTotal: oldProdTotal,
+            newTotal: prodNewTotal,
+            diff: prodNewTotal - oldProdTotal,
+            dropPercent: dropPct,
+            status
+          });
+        }
+      }
+
+      const matchedArr = Array.from(matchedNameSet);
+      productSummaries.push({
+        rowIndex: first.rowIndex,
+        productNo: pno,
+        productName: rawPname,
+        optionType: isSingleItemProduct ? '설정안함' : '조합형',
+        optionName: category === 'helmet' && hasAnySize ? '사이즈' : (isSingleItemProduct ? '' : '옵션'),
+        oldTotal: oldProdTotal,
+        newTotal: prodNewTotal,
+        diff: prodNewTotal - oldProdTotal,
+        status,
+        failOpts,
+        estOpts,
+        noSizeOpts,
+        addonFail: 0,
+        addonEst: 0,
+        matchMethod: Array.from(methodSet).slice(0, 2).join(', ') || '-',
+        matchedSummary: matchedArr.length > 0 ? matchedArr.slice(0, 3).join(', ') + (matchedArr.length > 3 ? ` 외 ${matchedArr.length - 3}건` : '') : '-',
+        isIgnored: false
+      });
+    }
+
+    dropWarnings.sort((a, b) => b.dropPercent - a.dropPercent || a.diff - b.diff);
+    displayNameDiffs.sort((a, b) => (b.isMatchMismatch ? 1 : 0) - (a.isMatchMismatch ? 1 : 0));
+
+    return {
+      channel: ch,
+      meta: {
+        storeTime: index.meta.store_time || '-',
+        hqTime: index.meta.hq_time || '-',
+        hqDefault: cfg.hq_default_stock,
+        dropWarningPercent: cfg.drop_warning_percent,
+        inventoryItemCount: index.items.length,
+        helmetBaseCount: index.bases.length,
+        productCount: productOrder.length,
+        optionCount: itemRows.length,
+        oldTotalSum,
+        newTotalSum,
+        totalDiff: newTotalSum - oldTotalSum,
+        statusCounts,
+        totalAddonProducts: 0,
+        totalAddonItems: 0,
+        totalAddonFail: 0,
+        totalAddonEstimate: 0,
+        todayShipAdjustedCount: 0,
+        coupangOnlyChanged: onlyChangedCoupang,
+        coupangWriteCount,
+        uneditableCount,
+        displayDiffCount: displayNameDiffs.length,
+        displayDiffMismatchCount: displayNameDiffs.filter(d => d.isMatchMismatch).length
+      },
+      index,
+      productSummaries,
+      optionDetails,
+      addonDetails: [],
+      displayNameDiffs,
+      reviewQueue,
+      aliasCandidates: Array.from(aliasCandidateMap.values()),
+      dropWarnings,
+      rowUpdates
     };
   }
 
@@ -1619,6 +2590,8 @@
     rankHelmetCandidates,
     rankGeneralItemCandidates,
     processAddons,
-    runMatching
+    extractSizeAndDesign,
+    runMatching,
+    runChannelMatching
   };
 });
